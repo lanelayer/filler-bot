@@ -1,0 +1,55 @@
+[package]
+name = "lanelayer-filler-bot"
+version = "0.1.0"
+edition = "2021"
+authors = ["LaneLayer Team"]
+description = "Filler bot for LaneLayer - fulfills user intents by exchanging laneBTC for BTC"
+license = "MIT"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.0", features = ["full", "sync"] }
+
+# HTTP client for JSON-RPC calls to Core Lane
+reqwest = { version = "0.11", features = ["json"] }
+
+# Bitcoin RPC client
+bitcoincore-rpc = "0.19"
+bitcoin = "0.31"
+
+# Ethereum/Alloy primitives for Core Lane interaction
+alloy-primitives = "0.3"
+alloy-consensus = "0.3"
+alloy-rlp = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4.0", features = ["derive"] }
+
+# Hex encoding/decoding
+hex = "0.4"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Collections
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# ABI encoding/decoding (for intent parsing)
+ethabi = "17.0"
+
+# Base58 encoding (for Bitcoin addresses)
+bs58 = "0.5"
+
+# Additional tokio features
