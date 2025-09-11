@@ -52,4 +52,7 @@ ethabi = "17.0"
 # Base58 encoding (for Bitcoin addresses)
 bs58 = "0.5"
 
+# Hashing
+sha2 = "0.10"
+
 # Additional tokio features
