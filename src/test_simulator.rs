@@ -1,5 +1,5 @@
 use anyhow::Result;
-use alloy_primitives::{Address, B256, U256, Bytes};
+use alloy_primitives::{Address, B256, Bytes};
 use sha2::{Sha256, Digest};
 use std::str::FromStr;
 
@@ -45,7 +45,7 @@ impl SimulatorTester {
         let store_call = self.contract.encode_store_blob_call(test_data, expiry_time);
         println!("📞 Store blob call data: {}", store_call);
 
-        let tx_data = Bytes::from(hex::decode(store_call.trim_start_matches("0x"))?);
+        let _tx_data = Bytes::from(hex::decode(store_call.trim_start_matches("0x"))?);
 
         println!("🚀 Prepared store blob transaction:");
         println!("   To: 0x{:x}", self.simulator_address);
@@ -82,7 +82,7 @@ impl SimulatorTester {
         println!("📞 Intent call data: {}", intent_call);
 
         // Prepare transaction data for actual sending
-        let tx_data = Bytes::from(hex::decode(intent_call.trim_start_matches("0x"))?);
+        let _tx_data = Bytes::from(hex::decode(intent_call.trim_start_matches("0x"))?);
 
         println!("🚀 Prepared intent creation transaction:");
         println!("   To: 0x{:x}", self.simulator_address);

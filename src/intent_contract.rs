@@ -1,7 +1,6 @@
 use alloy_primitives::{Address, U256, B256, Bytes, keccak256};
 use alloy_sol_types::{sol, SolCall};
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use crate::intent_manager::IntentData;
 
@@ -290,7 +289,7 @@ impl IntentContract {
     /// The transaction should be a call to the exit marketplace with intent data
     pub fn parse_intent_from_transaction(
         &self,
-        tx_hash: B256,
+        _tx_hash: B256,
         from: Address,
         value: U256,
         input_data: &[u8],
@@ -350,7 +349,7 @@ impl IntentContract {
     /// Extract Bitcoin address from string data
     fn extract_bitcoin_address_from_string(&self, input: &str) -> Option<String> {
         use bitcoin::{Address, Network};
-        
+
         // Try to parse as bech32 addresses (bc1, tb1)
         for prefix in ["bc1", "tb1"] {
             if let Some(start) = input.find(prefix) {
@@ -358,11 +357,11 @@ impl IntentContract {
                 let addr_start = start;
                 let addr_end = input[addr_start..].find(|c: char| !c.is_alphanumeric()).unwrap_or(input.len() - addr_start);
                 let addr_str = &input[addr_start..addr_start + addr_end];
-                
+
                 // Validate bech32 address length and format
                 if addr_str.len() >= 26 && addr_str.len() <= 62 {
                     // Try to parse as a valid Bitcoin address
-                    if let Ok(addr) = addr_str.parse::<Address>() {
+                    if let Ok(addr) = addr_str.parse::<Address<bitcoin::address::NetworkUnchecked>>() {
                         // Verify it's a valid address for the appropriate network
                         let network = if prefix == "bc1" { Network::Bitcoin } else { Network::Testnet };
                         if addr.is_valid_for_network(network) {
@@ -379,11 +378,11 @@ impl IntentContract {
                 let addr_start = start;
                 let addr_end = input[addr_start..].find(|c: char| !c.is_alphanumeric()).unwrap_or(input.len() - addr_start);
                 let addr_str = &input[addr_start..addr_start + addr_end];
-                
+
                 // Validate legacy address length and format
                 if addr_str.len() >= 26 && addr_str.len() <= 35 {
                     // Try to parse as a valid Bitcoin address
-                    if let Ok(addr) = addr_str.parse::<Address>() {
+                    if let Ok(addr) = addr_str.parse::<Address<bitcoin::address::NetworkUnchecked>>() {
                         // Verify it's a valid address for testnet (since we're using tb1 above)
                         if addr.is_valid_for_network(Network::Testnet) || addr.is_valid_for_network(Network::Bitcoin) {
                             return Some(addr_str.to_string());

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use alloy_primitives::{Address, U256, B256};
+use alloy_primitives::{Address, U256};
 use std::sync::Arc;
 use std::str::FromStr;
 use tokio::sync::Mutex;
@@ -15,7 +15,7 @@ pub struct FillerBot {
     core_lane_client: Arc<CoreLaneClient>,
     bitcoin_client: Arc<BitcoinClient>,
     intent_manager: Arc<Mutex<IntentManager>>,
-    intent_contract: IntentContract,
+    pub intent_contract: IntentContract,
     exit_marketplace: Address,
     filler_address: Address,
     poll_interval: u64,
@@ -210,7 +210,7 @@ impl FillerBot {
 
     fn extract_bitcoin_address_from_string(&self, input: &str) -> Option<String> {
         use bitcoin::{Address, Network};
-        
+
         // Try to parse as bech32 addresses (bc1, tb1)
         for prefix in ["bc1", "tb1"] {
             if let Some(start) = input.find(prefix) {
@@ -218,11 +218,11 @@ impl FillerBot {
                 let addr_start = start;
                 let addr_end = input[addr_start..].find(|c: char| !c.is_alphanumeric()).unwrap_or(input.len() - addr_start);
                 let addr_str = &input[addr_start..addr_start + addr_end];
-                
+
                 // Validate bech32 address length and format
                 if addr_str.len() >= 26 && addr_str.len() <= 62 {
                     // Try to parse as a valid Bitcoin address
-                    if let Ok(addr) = addr_str.parse::<Address>() {
+                    if let Ok(addr) = addr_str.parse::<Address<bitcoin::address::NetworkUnchecked>>() {
                         // Verify it's a valid address for the appropriate network
                         let network = if prefix == "bc1" { Network::Bitcoin } else { Network::Testnet };
                         if addr.is_valid_for_network(network) {
@@ -239,11 +239,11 @@ impl FillerBot {
                 let addr_start = start;
                 let addr_end = input[addr_start..].find(|c: char| !c.is_alphanumeric()).unwrap_or(input.len() - addr_start);
                 let addr_str = &input[addr_start..addr_start + addr_end];
-                
+
                 // Validate legacy address length and format
                 if addr_str.len() >= 26 && addr_str.len() <= 35 {
                     // Try to parse as a valid Bitcoin address
-                    if let Ok(addr) = addr_str.parse::<Address>() {
+                    if let Ok(addr) = addr_str.parse::<Address<bitcoin::address::NetworkUnchecked>>() {
                         // Verify it's a valid address for testnet (since we're using tb1 above)
                         if addr.is_valid_for_network(Network::Testnet) || addr.is_valid_for_network(Network::Bitcoin) {
                             return Some(addr_str.to_string());
@@ -384,7 +384,8 @@ impl FillerBot {
         drop(manager);
 
         // Start asynchronous confirmation monitoring
-        self.monitor_bitcoin_confirmation(&intent.intent_id, txid).await?;
+        let txid_parsed = bitcoin::Txid::from_str(&txid)?;
+        self.monitor_bitcoin_confirmation(&intent.intent_id, txid_parsed).await?;
 
         info!("✅ Intent {} fulfilled successfully!", intent.intent_id);
 
@@ -396,19 +397,19 @@ impl FillerBot {
         let bitcoin_client = self.bitcoin_client.clone();
         let intent_manager = self.intent_manager.clone();
         let intent_id = intent_id.to_string();
-        
+
         // Spawn a background task to monitor confirmations
         tokio::spawn(async move {
             let mut confirmations = 0u32;
             let required_confirmations = 1u32; // Minimum confirmations required
-            
+
             loop {
                 // Check current confirmation count
                 match bitcoin_client.get_transaction_confirmations(&txid).await {
                     Ok(current_confirmations) => {
                         if current_confirmations > confirmations {
                             confirmations = current_confirmations;
-                            
+
                             // Update the intent manager with new confirmation count
                             {
                                 let mut manager = intent_manager.lock().await;
@@ -416,13 +417,13 @@ impl FillerBot {
                                     error!("Failed to update confirmations for intent {}: {}", intent_id, e);
                                 }
                             }
-                            
-                            info!("📈 Intent {} Bitcoin transaction {} now has {} confirmations", 
+
+                            info!("📈 Intent {} Bitcoin transaction {} now has {} confirmations",
                                   intent_id, txid, confirmations);
-                            
+
                             // If we have enough confirmations, we're done monitoring
                             if confirmations >= required_confirmations {
-                                info!("✅ Intent {} Bitcoin transaction {} fully confirmed with {} confirmations", 
+                                info!("✅ Intent {} Bitcoin transaction {} fully confirmed with {} confirmations",
                                       intent_id, txid, confirmations);
                                 break;
                             }
@@ -432,13 +433,13 @@ impl FillerBot {
                         error!("Failed to check confirmations for intent {}: {}", intent_id, e);
                     }
                 }
-                
+
                 // Wait before checking again (exponential backoff)
                 let delay = std::cmp::min(60, 5 * (confirmations + 1));
                 tokio::time::sleep(tokio::time::Duration::from_secs(delay as u64)).await;
             }
         });
-        
+
         Ok(())
     }
 }
