@@ -8,8 +8,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::core_lane_client::CoreLaneClient;
 use crate::bitcoin_client::BitcoinClient;
-use crate::intent_manager::{IntentManager, IntentData as ManagerIntentData, IntentStatus, UserIntent};
-use crate::intent_contract::{IntentContract, IntentData as ContractIntentData};
+use crate::intent_manager::{IntentManager, IntentData, IntentStatus};
+use crate::intent_contract::{IntentContract, decode_intent_calldata, IntentCall};
 
 pub struct FillerBot {
     core_lane_client: Arc<CoreLaneClient>,
@@ -141,22 +141,13 @@ impl FillerBot {
             if to.to_lowercase() == format!("0x{:x}", self.exit_marketplace).to_lowercase() {
                 info!("🎯 Found transaction to exit marketplace: {}", tx_hash);
 
-                // Parse the intent from the transaction using the intent contract
+                // Parse the intent from the transaction using ABI decoding
                 if let Some(intent_data) = self.parse_intent_from_transaction(&tx).await? {
                     info!("📝 Parsed intent: {} ({} laneBTC -> {})",
                           intent_data.intent_id, intent_data.lane_btc_amount, intent_data.btc_destination);
 
-                    // Convert to manager intent data and add to our manager
-                    let manager_intent_data = ManagerIntentData {
-                        intent_id: intent_data.intent_id.to_string(),
-                        user_address: intent_data.user_address,
-                        btc_destination: intent_data.btc_destination,
-                        lane_btc_amount: intent_data.lane_btc_amount,
-                        fee: intent_data.fee,
-                    };
-
                     let mut manager = self.intent_manager.lock().await;
-                    manager.add_intent(manager_intent_data)?;
+                    manager.add_intent(intent_data)?;
                 }
             }
         }
@@ -164,40 +155,47 @@ impl FillerBot {
         Ok(())
     }
 
-    pub async fn parse_intent_from_transaction(&self, tx: &crate::core_lane_client::Transaction) -> Result<Option<ContractIntentData>> {
-        // Parse exit marketplace intent from transaction using the intent contract
-        let tx_hash = B256::from_str(&tx.hash)?;
-        let from = Address::from_str(&tx.from)?;
-        let value = U256::from_str_radix(&tx.value.trim_start_matches("0x"), 16)?;
-
-        // Decode input data
+    pub async fn parse_intent_from_transaction(&self, tx: &crate::core_lane_client::Transaction) -> Result<Option<IntentData>> {
+        // Decode input data using ABI decoding
         let input_hex = tx.input.trim_start_matches("0x");
         let input_data = hex::decode(input_hex)?;
 
-        // Use the intent contract to parse the intent
-        self.intent_contract.parse_intent_from_transaction(tx_hash, from, value, &input_data)
-    }
+        // Use alloy ABI decoding to parse the intent call
+        if let Some(intent_call) = decode_intent_calldata(&input_data) {
+            match intent_call {
+                IntentCall::Intent { intent_data, nonce } => {
+                    // Parse Bitcoin address from intent data
+                    let btc_destination = self.parse_bitcoin_address_from_input(&intent_data)?;
 
-    pub fn parse_bitcoin_address_from_input(&self, input: &str) -> Result<String> {
-        // Parse Bitcoin address from transaction input data
-        // The input should contain the user's desired Bitcoin address
+                    // Calculate intent ID using the same method as core-lane
+                    let from = Address::from_str(&tx.from)?;
+                    let intent_id = crate::intent_contract::calculate_intent_id(from, nonce.to::<u64>(), intent_data.clone().into());
 
-        if input.len() < 10 {
-            return Err(anyhow::anyhow!("Input too short"));
+                    // Calculate fee (1% of the amount)
+                    let value = U256::from_str_radix(&tx.value.trim_start_matches("0x"), 16)?;
+                    let fee = value / U256::from(100);
+
+                    return Ok(Some(IntentData {
+                        intent_id: format!("0x{:x}", intent_id),
+                        user_address: from,
+                        btc_destination,
+                        lane_btc_amount: value,
+                        fee,
+                    }));
+                }
+                _ => {
+                    // Not an intent call, return None
+                    return Ok(None);
+                }
+            }
         }
 
-        // Remove 0x prefix and decode hex
-        let input_hex = input.trim_start_matches("0x");
-        let input_bytes = hex::decode(input_hex)
-            .map_err(|e| anyhow::anyhow!("Invalid hex input: {}", e))?;
+        Ok(None)
+    }
 
-        // For now, we'll extract a Bitcoin address from the input data
-        // Parse the ABI-encoded data from transaction input
-        // and extract the Bitcoin address parameter
-
-        // Look for a Bitcoin address pattern in the input
-        // Bitcoin addresses are typically 26-35 characters and start with 1, 3, or bc1
-        let input_str = String::from_utf8_lossy(&input_bytes);
+    pub fn parse_bitcoin_address_from_input(&self, input_data: &[u8]) -> Result<String> {
+        // Parse Bitcoin address from intent data bytes
+        let input_str = String::from_utf8_lossy(input_data);
 
         // Try to find a Bitcoin address pattern
         if let Some(addr) = self.extract_bitcoin_address_from_string(&input_str) {
@@ -205,32 +203,53 @@ impl FillerBot {
         }
 
         // Fallback: generate a test address based on the input hash
-        let hash = hex::encode(&input_bytes[..8.min(input_bytes.len())]);
+        let hash = hex::encode(&input_data[..8.min(input_data.len())]);
         let address_part = if hash.len() >= 32 { &hash[..32] } else { &hash };
         Ok(format!("tb1q{}", address_part)) // Testnet bech32 address
     }
 
     fn extract_bitcoin_address_from_string(&self, input: &str) -> Option<String> {
-        // Look for Bitcoin address patterns
-        // This is a simplified implementation - in reality you'd use proper address validation
-
-        // Look for bech32 addresses (starts with bc1 or tb1)
-        if let Some(start) = input.find("tb1q") {
-            let addr_start = start;
-            let addr_end = input[addr_start..].find(|c: char| !c.is_alphanumeric()).unwrap_or(input.len() - addr_start);
-            let addr = &input[addr_start..addr_start + addr_end];
-            if addr.len() >= 26 && addr.len() <= 62 {
-                return Some(addr.to_string());
+        use bitcoin::{Address, Network};
+        
+        // Try to parse as bech32 addresses (bc1, tb1)
+        for prefix in ["bc1", "tb1"] {
+            if let Some(start) = input.find(prefix) {
+                // Find the end of the address (stop at non-alphanumeric characters)
+                let addr_start = start;
+                let addr_end = input[addr_start..].find(|c: char| !c.is_alphanumeric()).unwrap_or(input.len() - addr_start);
+                let addr_str = &input[addr_start..addr_start + addr_end];
+                
+                // Validate bech32 address length and format
+                if addr_str.len() >= 26 && addr_str.len() <= 62 {
+                    // Try to parse as a valid Bitcoin address
+                    if let Ok(addr) = addr_str.parse::<Address>() {
+                        // Verify it's a valid address for the appropriate network
+                        let network = if prefix == "bc1" { Network::Bitcoin } else { Network::Testnet };
+                        if addr.is_valid_for_network(network) {
+                            return Some(addr_str.to_string());
+                        }
+                    }
+                }
             }
         }
 
-        // Look for legacy addresses (starts with 1 or 3)
-        if let Some(start) = input.find(|c| c == '1' || c == '3') {
-            let addr_start = start;
-            let addr_end = input[addr_start..].find(|c: char| !c.is_alphanumeric()).unwrap_or(input.len() - addr_start);
-            let addr = &input[addr_start..addr_start + addr_end];
-            if addr.len() >= 26 && addr.len() <= 35 {
-                return Some(addr.to_string());
+        // Try to parse as legacy addresses (1, 3)
+        for prefix in ['1', '3'] {
+            if let Some(start) = input.find(prefix) {
+                let addr_start = start;
+                let addr_end = input[addr_start..].find(|c: char| !c.is_alphanumeric()).unwrap_or(input.len() - addr_start);
+                let addr_str = &input[addr_start..addr_start + addr_end];
+                
+                // Validate legacy address length and format
+                if addr_str.len() >= 26 && addr_str.len() <= 35 {
+                    // Try to parse as a valid Bitcoin address
+                    if let Ok(addr) = addr_str.parse::<Address>() {
+                        // Verify it's a valid address for testnet (since we're using tb1 above)
+                        if addr.is_valid_for_network(Network::Testnet) || addr.is_valid_for_network(Network::Bitcoin) {
+                            return Some(addr_str.to_string());
+                        }
+                    }
+                }
             }
         }
 
@@ -364,15 +383,62 @@ impl FillerBot {
         manager.set_bitcoin_txid(&intent.intent_id, txid.to_string())?;
         drop(manager);
 
-        // Wait for confirmation
-        self.bitcoin_client.wait_for_confirmation(&txid, 1).await?;
-
-        // Update confirmations
-        let mut manager = self.intent_manager.lock().await;
-        manager.update_bitcoin_confirmations(&intent.intent_id, 1)?;
+        // Start asynchronous confirmation monitoring
+        self.monitor_bitcoin_confirmation(&intent.intent_id, txid).await?;
 
         info!("✅ Intent {} fulfilled successfully!", intent.intent_id);
 
+        Ok(())
+    }
+
+    /// Asynchronously monitor Bitcoin transaction confirmations
+    async fn monitor_bitcoin_confirmation(&self, intent_id: &str, txid: bitcoin::Txid) -> Result<()> {
+        let bitcoin_client = self.bitcoin_client.clone();
+        let intent_manager = self.intent_manager.clone();
+        let intent_id = intent_id.to_string();
+        
+        // Spawn a background task to monitor confirmations
+        tokio::spawn(async move {
+            let mut confirmations = 0u32;
+            let required_confirmations = 1u32; // Minimum confirmations required
+            
+            loop {
+                // Check current confirmation count
+                match bitcoin_client.get_transaction_confirmations(&txid).await {
+                    Ok(current_confirmations) => {
+                        if current_confirmations > confirmations {
+                            confirmations = current_confirmations;
+                            
+                            // Update the intent manager with new confirmation count
+                            {
+                                let mut manager = intent_manager.lock().await;
+                                if let Err(e) = manager.update_bitcoin_confirmations(&intent_id, confirmations) {
+                                    error!("Failed to update confirmations for intent {}: {}", intent_id, e);
+                                }
+                            }
+                            
+                            info!("📈 Intent {} Bitcoin transaction {} now has {} confirmations", 
+                                  intent_id, txid, confirmations);
+                            
+                            // If we have enough confirmations, we're done monitoring
+                            if confirmations >= required_confirmations {
+                                info!("✅ Intent {} Bitcoin transaction {} fully confirmed with {} confirmations", 
+                                      intent_id, txid, confirmations);
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to check confirmations for intent {}: {}", intent_id, e);
+                    }
+                }
+                
+                // Wait before checking again (exponential backoff)
+                let delay = std::cmp::min(60, 5 * (confirmations + 1));
+                tokio::time::sleep(tokio::time::Duration::from_secs(delay as u64)).await;
+            }
+        });
+        
         Ok(())
     }
 }

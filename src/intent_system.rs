@@ -10,40 +10,40 @@ pub trait IntentSystem {
     // Blob storage functions
     /// Store a blob for access by intent system until expiryTime, payment for rent
     async fn store_blob(&self, data: &[u8], expiry_time: u64) -> Result<String>;
-    
+
     /// Prolong blob storage by extending expiry time
     async fn prolong_blob(&self, blob_hash: B256) -> Result<String>;
-    
+
     /// Check if a blob is currently stored
     async fn blob_stored(&self, blob_hash: B256) -> Result<bool>;
 
     // Intent creation functions
     /// Make an intent with a particular increasing nonce and value locked
     async fn intent(&self, intent_data: &[u8], nonce: u64) -> Result<B256>;
-    
+
     /// Make an intent based on a blob and attach extraData to execution
     async fn intent_from_blob(&self, blob_hash: B256, nonce: u64, extra_data: &[u8]) -> Result<B256>;
 
     // Intent management functions
     /// Cancel an intent if intent allows us
     async fn cancel_intent(&self, intent_id: B256, data: &[u8]) -> Result<String>;
-    
+
     /// Lock the intent for solving (solver wants to solve it)
     async fn lock_intent_for_solving(&self, intent_id: B256, data: &[u8]) -> Result<String>;
-    
+
     /// Solve the intent (solver holds the lock, pass data to intent)
     async fn solve_intent(&self, intent_id: B256, data: &[u8]) -> Result<String>;
-    
+
     /// Cancel intent lock (solver gives up, may pay fee to user)
     async fn cancel_intent_lock(&self, intent_id: B256, data: &[u8]) -> Result<String>;
 
     // Query functions
     /// Check if an intent is solved
     async fn is_intent_solved(&self, intent_id: B256) -> Result<bool>;
-    
+
     /// Get the address that locked the intent
     async fn intent_locker(&self, intent_id: B256) -> Result<Option<Address>>;
-    
+
     /// Get the value stored in an intent
     async fn value_stored_in_intent(&self, intent_id: B256) -> Result<U256>;
 }
@@ -74,7 +74,7 @@ impl IntentSystem for CoreLaneIntentSystem {
     async fn store_blob(&self, data: &[u8], expiry_time: u64) -> Result<String> {
         let data_hex = format!("0x{}", hex::encode(data));
         let expiry_hex = format!("0x{:x}", expiry_time);
-        
+
         self.client.send_transaction(
             &format!("0x{:x}", self.contract_address),
             "storeBlob(bytes,uint256)",
@@ -85,7 +85,7 @@ impl IntentSystem for CoreLaneIntentSystem {
 
     async fn prolong_blob(&self, blob_hash: B256) -> Result<String> {
         let blob_hash_hex = format!("0x{:064x}", blob_hash);
-        
+
         self.client.send_transaction(
             &format!("0x{:x}", self.contract_address),
             "prolongBlob(bytes32)",
@@ -96,7 +96,7 @@ impl IntentSystem for CoreLaneIntentSystem {
 
     async fn blob_stored(&self, blob_hash: B256) -> Result<bool> {
         let blob_hash_hex = format!("0x{:064x}", blob_hash);
-        
+
         let result = self.client.call(
             &format!("0x{:x}", self.contract_address),
             "blobStored(bytes32)",
@@ -111,7 +111,7 @@ impl IntentSystem for CoreLaneIntentSystem {
     async fn intent(&self, intent_data: &[u8], nonce: u64) -> Result<B256> {
         let data_hex = format!("0x{}", hex::encode(intent_data));
         let nonce_hex = format!("0x{:x}", nonce);
-        
+
         let tx_hash = self.client.send_transaction(
             &format!("0x{:x}", self.contract_address),
             "intent(bytes,uint256)",
@@ -127,7 +127,7 @@ impl IntentSystem for CoreLaneIntentSystem {
         let blob_hash_hex = format!("0x{:064x}", blob_hash);
         let nonce_hex = format!("0x{:x}", nonce);
         let extra_data_hex = format!("0x{}", hex::encode(extra_data));
-        
+
         let tx_hash = self.client.send_transaction(
             &format!("0x{:x}", self.contract_address),
             "intentFromBlob(bytes32,uint256,bytes)",
@@ -141,7 +141,7 @@ impl IntentSystem for CoreLaneIntentSystem {
     async fn cancel_intent(&self, intent_id: B256, data: &[u8]) -> Result<String> {
         let intent_id_hex = format!("0x{:064x}", intent_id);
         let data_hex = format!("0x{}", hex::encode(data));
-        
+
         self.client.send_transaction(
             &format!("0x{:x}", self.contract_address),
             "cancelIntent(bytes32,bytes)",
@@ -153,7 +153,7 @@ impl IntentSystem for CoreLaneIntentSystem {
     async fn lock_intent_for_solving(&self, intent_id: B256, data: &[u8]) -> Result<String> {
         let intent_id_hex = format!("0x{:064x}", intent_id);
         let data_hex = format!("0x{}", hex::encode(data));
-        
+
         self.client.send_transaction(
             &format!("0x{:x}", self.contract_address),
             "lockIntentForSolving(bytes32,bytes)",
@@ -165,7 +165,7 @@ impl IntentSystem for CoreLaneIntentSystem {
     async fn solve_intent(&self, intent_id: B256, data: &[u8]) -> Result<String> {
         let intent_id_hex = format!("0x{:064x}", intent_id);
         let data_hex = format!("0x{}", hex::encode(data));
-        
+
         self.client.send_transaction(
             &format!("0x{:x}", self.contract_address),
             "solveIntent(bytes32,bytes)",
@@ -177,7 +177,7 @@ impl IntentSystem for CoreLaneIntentSystem {
     async fn cancel_intent_lock(&self, intent_id: B256, data: &[u8]) -> Result<String> {
         let intent_id_hex = format!("0x{:064x}", intent_id);
         let data_hex = format!("0x{}", hex::encode(data));
-        
+
         self.client.send_transaction(
             &format!("0x{:x}", self.contract_address),
             "cancelIntentLock(bytes32,bytes)",
@@ -188,7 +188,7 @@ impl IntentSystem for CoreLaneIntentSystem {
 
     async fn is_intent_solved(&self, intent_id: B256) -> Result<bool> {
         let intent_id_hex = format!("0x{:064x}", intent_id);
-        
+
         let result = self.client.call(
             &format!("0x{:x}", self.contract_address),
             "isIntentSolved(bytes32)",
@@ -201,7 +201,7 @@ impl IntentSystem for CoreLaneIntentSystem {
 
     async fn intent_locker(&self, intent_id: B256) -> Result<Option<Address>> {
         let intent_id_hex = format!("0x{:064x}", intent_id);
-        
+
         let result = self.client.call(
             &format!("0x{:x}", self.contract_address),
             "intentLocker(bytes32)",
@@ -219,7 +219,7 @@ impl IntentSystem for CoreLaneIntentSystem {
 
     async fn value_stored_in_intent(&self, intent_id: B256) -> Result<U256> {
         let intent_id_hex = format!("0x{:064x}", intent_id);
-        
+
         let result = self.client.call(
             &format!("0x{:x}", self.contract_address),
             "valueStoredInIntent(bytes32)",
@@ -373,7 +373,7 @@ impl IntentSystemABI {
     /// Generate function selectors for the IntentSystem interface
     pub fn generate_selectors() -> std::collections::HashMap<String, String> {
         let mut selectors = std::collections::HashMap::new();
-        
+
         // These are the actual function selectors (first 4 bytes of keccak256 hash)
         selectors.insert("storeBlob(bytes,uint256)".to_string(), "0x12345678".to_string());
         selectors.insert("prolongBlob(bytes32)".to_string(), "0x23456789".to_string());
@@ -387,7 +387,7 @@ impl IntentSystemABI {
         selectors.insert("isIntentSolved(bytes32)".to_string(), "0x01234567".to_string());
         selectors.insert("intentLocker(bytes32)".to_string(), "0x12345678".to_string());
         selectors.insert("valueStoredInIntent(bytes32)".to_string(), "0x23456789".to_string());
-        
+
         selectors
     }
 }

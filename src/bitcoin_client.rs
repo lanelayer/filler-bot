@@ -131,4 +131,14 @@ impl BitcoinClient {
         let info: serde_json::Value = self.client.call("getwalletinfo", &[])?;
         Ok(info)
     }
+
+    pub async fn get_transaction_confirmations(&self, txid: &bitcoin::Txid) -> Result<u32> {
+        let tx_info: serde_json::Value = self.client.call("gettransaction", &[json!(txid.to_string())])?;
+        
+        if let Some(confirmations) = tx_info.get("confirmations") {
+            Ok(confirmations.as_u64().unwrap_or(0) as u32)
+        } else {
+            Ok(0)
+        }
+    }
 }

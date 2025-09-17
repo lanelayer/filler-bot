@@ -56,7 +56,7 @@ async fn test_bitcoin_address_parsing() {
     ];
 
     for (input, expected_pattern) in test_inputs {
-        let result = bot.parse_bitcoin_address_from_input(input);
+        let result = bot.parse_bitcoin_address_from_input(input.as_bytes());
         assert!(result.is_ok(), "Failed to parse input: {}", input);
 
         let address = result.unwrap();

@@ -3,7 +3,6 @@ use alloy_primitives::{Address, U256};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::str::FromStr;
 
 #[derive(Debug, Serialize)]
 struct JsonRpcRequest {
