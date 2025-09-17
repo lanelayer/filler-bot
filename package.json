@@ -1,0 +1,20 @@
+{
+  "name": "lanelayer-filler-bot-simulator",
+  "version": "1.0.0",
+  "description": "Simulator contract for testing LaneLayer filler bot",
+  "scripts": {
+    "deploy": "hardhat run scripts/deploy_simulator.js --network localhost",
+    "compile": "hardhat compile",
+    "test": "hardhat test"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "hardhat": "^2.19.0"
+  },
+  "dependencies": {
+    "ethers": "^6.8.0"
+  }
+}
+
+
+

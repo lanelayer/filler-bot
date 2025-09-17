@@ -11,6 +11,7 @@ use lanelayer_filler_bot::{
     IntentManager,
     IntentContract,
     FillerBot,
+    SimulatorTester,
 };
 
 #[derive(Parser)]
@@ -78,6 +79,17 @@ enum Commands {
         /// Bitcoin RPC password
         #[arg(long)]
         bitcoin_rpc_password: String,
+    },
+
+    /// Test against IntentSystem simulator contract
+    TestSimulator {
+        /// Core Lane JSON-RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        core_lane_url: String,
+
+        /// Simulator contract address
+        #[arg(long)]
+        simulator_address: String,
     },
 }
 
@@ -171,6 +183,29 @@ async fn main() -> Result<()> {
                 }
                 Err(e) => {
                     error!("❌ Bitcoin connection failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::TestSimulator {
+            core_lane_url,
+            simulator_address,
+        } => {
+            // Parse the simulator address
+            let simulator_addr = simulator_address.parse()
+                .map_err(|e| anyhow::anyhow!("Invalid simulator address: {}", e))?;
+
+            // Create simulator tester
+            let tester = SimulatorTester::new(core_lane_url.clone(), simulator_addr);
+
+            // Run all tests
+            match tester.run_all_tests().await {
+                Ok(_) => {
+                    info!("🎉 All simulator tests completed successfully!");
+                }
+                Err(e) => {
+                    error!("❌ Simulator tests failed: {}", e);
                     std::process::exit(1);
                 }
             }

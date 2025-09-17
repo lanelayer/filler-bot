@@ -3,7 +3,6 @@ use alloy_primitives::{Address, U256};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::str::FromStr;
 
 #[derive(Debug, Serialize)]
 struct JsonRpcRequest {
@@ -63,6 +62,7 @@ pub struct TransactionReceipt {
     pub logs: Vec<Value>,
 }
 
+#[derive(Clone)]
 pub struct CoreLaneClient {
     client: Client,
     base_url: String,
@@ -194,37 +194,4 @@ impl CoreLaneClient {
         Ok(result_str.to_string())
     }
 
-    /// Check if an intent is already locked by calling intentLocker(intentId)
-    /// For now, we'll use a simple approach - check if the intent has been processed
-    pub async fn get_intent_locker(&self, _intent_contract: Address, _intent_id: &str) -> Result<Option<Address>> {
-        // Check if the intent is already locked by another filler
-        // For now, we'll assume intents are not locked by default
-        // This allows multiple fillers to compete for intents
-        Ok(None)
-    }
-
-    /// Lock an intent for solving by calling lockIntentForSolving(intentId)
-    pub async fn lock_intent_for_solving(&self, _intent_contract: Address, intent_id: &str) -> Result<String> {
-        // Encode the function call: lockIntentForSolving(bytes32)
-        let function_selector = "0x12345678"; // lockIntentForSolving(bytes32)
-        let intent_id_padded = format!("{:0>64}", intent_id.trim_start_matches("0x"));
-        let call_data = format!("{}{}", function_selector, intent_id_padded);
-
-        // This would need to be a transaction, not a call
-        // For now, we'll return the call data that would be used in a transaction
-        Ok(call_data)
-    }
-
-    /// Solve an intent by calling solveIntent(intentId, blockNumber)
-    pub async fn solve_intent(&self, _intent_contract: Address, intent_id: &str, block_number: u64) -> Result<String> {
-        // Encode the function call: solveIntent(bytes32, uint64)
-        let function_selector = "0x87654321"; // solveIntent(bytes32, uint64)
-        let intent_id_padded = format!("{:0>64}", intent_id.trim_start_matches("0x"));
-        let block_number_padded = format!("{:0>64}", format!("{:x}", block_number));
-        let call_data = format!("{}{}{}", function_selector, intent_id_padded, block_number_padded);
-
-        // This would need to be a transaction, not a call
-        // For now, we'll return the call data that would be used in a transaction
-        Ok(call_data)
-    }
 }
