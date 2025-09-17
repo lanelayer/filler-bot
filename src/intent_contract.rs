@@ -483,6 +483,12 @@ impl IntentContract {
         format!("0x{}", hex::encode(call.abi_encode()))
     }
 
+    /// Encode function call for blobStored(blobHash)
+    pub fn encode_blob_stored_call(&self, blob_hash: B256) -> String {
+        let call = IntentSystem::blobStoredCall { blobHash: blob_hash.into() };
+        format!("0x{}", hex::encode(call.abi_encode()))
+    }
+
     /// Parse intent locker response
     pub fn parse_intent_locker_response(&self, response: &str) -> Result<Option<Address>> {
         if response == "0x" || response == "0x0000000000000000000000000000000000000000000000000000000000000000" {
@@ -498,6 +504,32 @@ impl IntentContract {
         } else {
             Ok(None)
         }
+    }
+
+    /// Parse blob stored response
+    pub fn parse_blob_stored_response(&self, response: &str) -> Result<bool> {
+        // Parse boolean from the result (0x0000000000000000000000000000000000000000000000000000000000000000 = false, 0x0000000000000000000000000000000000000000000000000000000000000001 = true)
+        let value = response.trim_start_matches("0x");
+        Ok(value.ends_with("1"))
+    }
+
+    /// Parse intent response (returns B256)
+    pub fn parse_intent_response(&self, response: &str) -> Result<B256> {
+        let hash_hex = response.trim_start_matches("0x");
+        Ok(B256::from_str(&format!("0x{}", hash_hex))?)
+    }
+
+    /// Parse is intent solved response
+    pub fn parse_is_intent_solved_response(&self, response: &str) -> Result<bool> {
+        // Parse boolean from the result
+        let value = response.trim_start_matches("0x");
+        Ok(value.ends_with("1"))
+    }
+
+    /// Parse value stored in intent response
+    pub fn parse_value_stored_in_intent_response(&self, response: &str) -> Result<U256> {
+        let value_hex = response.trim_start_matches("0x");
+        Ok(U256::from_str_radix(value_hex, 16)?)
     }
 }
 

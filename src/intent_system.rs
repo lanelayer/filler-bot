@@ -1,11 +1,10 @@
 use anyhow::Result;
 use alloy_primitives::{Address, U256, B256};
-use serde::{Deserialize, Serialize};
-use std::str::FromStr;
 
 /// IntentSystem interface for Core Lane
 /// This interface provides comprehensive intent management including blob storage,
 /// intent creation, locking, solving, and querying capabilities.
+#[async_trait::async_trait]
 pub trait IntentSystem {
     // Blob storage functions
     /// Store a blob for access by intent system until expiryTime, payment for rent
@@ -52,15 +51,15 @@ pub trait IntentSystem {
 pub struct CoreLaneIntentSystem {
     client: crate::core_lane_client::CoreLaneClient,
     contract_address: Address,
-    private_key: String,
+    intent_contract: crate::intent_contract::IntentContract,
 }
 
 impl CoreLaneIntentSystem {
-    pub fn new(client: crate::core_lane_client::CoreLaneClient, contract_address: Address, private_key: String) -> Self {
+    pub fn new(client: crate::core_lane_client::CoreLaneClient, contract_address: Address) -> Self {
         Self {
             client,
             contract_address,
-            private_key,
+            intent_contract: crate::intent_contract::IntentContract::new(contract_address),
         }
     }
 
@@ -70,164 +69,77 @@ impl CoreLaneIntentSystem {
     }
 }
 
+#[async_trait::async_trait]
 impl IntentSystem for CoreLaneIntentSystem {
     async fn store_blob(&self, data: &[u8], expiry_time: u64) -> Result<String> {
-        let data_hex = format!("0x{}", hex::encode(data));
-        let expiry_hex = format!("0x{:x}", expiry_time);
-
-        self.client.send_transaction(
-            &format!("0x{:x}", self.contract_address),
-            "storeBlob(bytes,uint256)",
-            &[&data_hex, &expiry_hex],
-            &self.private_key
-        ).await
+        let call_data = self.intent_contract.encode_store_blob_call(data, expiry_time);
+        let result = self.client.call_contract(self.contract_address, &call_data).await?;
+        Ok(result)
     }
 
     async fn prolong_blob(&self, blob_hash: B256) -> Result<String> {
-        let blob_hash_hex = format!("0x{:064x}", blob_hash);
-
-        self.client.send_transaction(
-            &format!("0x{:x}", self.contract_address),
-            "prolongBlob(bytes32)",
-            &[&blob_hash_hex],
-            &self.private_key
-        ).await
+        let call_data = self.intent_contract.encode_prolong_blob_call(blob_hash);
+        let result = self.client.call_contract(self.contract_address, &call_data).await?;
+        Ok(result)
     }
 
     async fn blob_stored(&self, blob_hash: B256) -> Result<bool> {
-        let blob_hash_hex = format!("0x{:064x}", blob_hash);
-
-        let result = self.client.call(
-            &format!("0x{:x}", self.contract_address),
-            "blobStored(bytes32)",
-            &[&blob_hash_hex]
-        ).await?;
-
-        // Parse boolean result
-        let result_hex = result.trim_start_matches("0x");
-        Ok(result_hex == "0000000000000000000000000000000000000000000000000000000000000001")
+        let call_data = self.intent_contract.encode_blob_stored_call(blob_hash);
+        let result = self.client.call_contract(self.contract_address, &call_data).await?;
+        self.intent_contract.parse_blob_stored_response(&result)
     }
 
     async fn intent(&self, intent_data: &[u8], nonce: u64) -> Result<B256> {
-        let data_hex = format!("0x{}", hex::encode(intent_data));
-        let nonce_hex = format!("0x{:x}", nonce);
-
-        let tx_hash = self.client.send_transaction(
-            &format!("0x{:x}", self.contract_address),
-            "intent(bytes,uint256)",
-            &[&data_hex, &nonce_hex],
-            &self.private_key
-        ).await?;
-
-        // Parse the returned intent ID from the transaction
-        Ok(B256::from_str(&tx_hash)?)
+        let call_data = self.intent_contract.encode_intent_call(intent_data, nonce);
+        let result = self.client.call_contract(self.contract_address, &call_data).await?;
+        self.intent_contract.parse_intent_response(&result)
     }
 
     async fn intent_from_blob(&self, blob_hash: B256, nonce: u64, extra_data: &[u8]) -> Result<B256> {
-        let blob_hash_hex = format!("0x{:064x}", blob_hash);
-        let nonce_hex = format!("0x{:x}", nonce);
-        let extra_data_hex = format!("0x{}", hex::encode(extra_data));
-
-        let tx_hash = self.client.send_transaction(
-            &format!("0x{:x}", self.contract_address),
-            "intentFromBlob(bytes32,uint256,bytes)",
-            &[&blob_hash_hex, &nonce_hex, &extra_data_hex],
-            &self.private_key
-        ).await?;
-
-        Ok(B256::from_str(&tx_hash)?)
+        let call_data = self.intent_contract.encode_intent_from_blob_call(blob_hash, nonce, extra_data);
+        let result = self.client.call_contract(self.contract_address, &call_data).await?;
+        self.intent_contract.parse_intent_response(&result)
     }
 
     async fn cancel_intent(&self, intent_id: B256, data: &[u8]) -> Result<String> {
-        let intent_id_hex = format!("0x{:064x}", intent_id);
-        let data_hex = format!("0x{}", hex::encode(data));
-
-        self.client.send_transaction(
-            &format!("0x{:x}", self.contract_address),
-            "cancelIntent(bytes32,bytes)",
-            &[&intent_id_hex, &data_hex],
-            &self.private_key
-        ).await
+        let call_data = self.intent_contract.encode_cancel_intent_call(intent_id, data);
+        let result = self.client.call_contract(self.contract_address, &call_data).await?;
+        Ok(result)
     }
 
     async fn lock_intent_for_solving(&self, intent_id: B256, data: &[u8]) -> Result<String> {
-        let intent_id_hex = format!("0x{:064x}", intent_id);
-        let data_hex = format!("0x{}", hex::encode(data));
-
-        self.client.send_transaction(
-            &format!("0x{:x}", self.contract_address),
-            "lockIntentForSolving(bytes32,bytes)",
-            &[&intent_id_hex, &data_hex],
-            &self.private_key
-        ).await
+        let call_data = self.intent_contract.encode_lock_intent_call(intent_id, data);
+        let result = self.client.call_contract(self.contract_address, &call_data).await?;
+        Ok(result)
     }
 
     async fn solve_intent(&self, intent_id: B256, data: &[u8]) -> Result<String> {
-        let intent_id_hex = format!("0x{:064x}", intent_id);
-        let data_hex = format!("0x{}", hex::encode(data));
-
-        self.client.send_transaction(
-            &format!("0x{:x}", self.contract_address),
-            "solveIntent(bytes32,bytes)",
-            &[&intent_id_hex, &data_hex],
-            &self.private_key
-        ).await
+        let call_data = self.intent_contract.encode_solve_intent_call(intent_id, data);
+        let result = self.client.call_contract(self.contract_address, &call_data).await?;
+        Ok(result)
     }
 
     async fn cancel_intent_lock(&self, intent_id: B256, data: &[u8]) -> Result<String> {
-        let intent_id_hex = format!("0x{:064x}", intent_id);
-        let data_hex = format!("0x{}", hex::encode(data));
-
-        self.client.send_transaction(
-            &format!("0x{:x}", self.contract_address),
-            "cancelIntentLock(bytes32,bytes)",
-            &[&intent_id_hex, &data_hex],
-            &self.private_key
-        ).await
+        let call_data = self.intent_contract.encode_cancel_intent_lock_call(intent_id, data);
+        let result = self.client.call_contract(self.contract_address, &call_data).await?;
+        Ok(result)
     }
 
     async fn is_intent_solved(&self, intent_id: B256) -> Result<bool> {
-        let intent_id_hex = format!("0x{:064x}", intent_id);
-
-        let result = self.client.call(
-            &format!("0x{:x}", self.contract_address),
-            "isIntentSolved(bytes32)",
-            &[&intent_id_hex]
-        ).await?;
-
-        let result_hex = result.trim_start_matches("0x");
-        Ok(result_hex == "0000000000000000000000000000000000000000000000000000000000000001")
+        let call_data = self.intent_contract.encode_is_intent_solved_call(intent_id);
+        let result = self.client.call_contract(self.contract_address, &call_data).await?;
+        self.intent_contract.parse_is_intent_solved_response(&result)
     }
 
     async fn intent_locker(&self, intent_id: B256) -> Result<Option<Address>> {
-        let intent_id_hex = format!("0x{:064x}", intent_id);
-
-        let result = self.client.call(
-            &format!("0x{:x}", self.contract_address),
-            "intentLocker(bytes32)",
-            &[&intent_id_hex]
-        ).await?;
-
-        let result_hex = result.trim_start_matches("0x");
-        if result_hex == "0000000000000000000000000000000000000000000000000000000000000000" {
-            Ok(None)
-        } else {
-            let address = Address::from_str(&format!("0x{}", result_hex))?;
-            Ok(Some(address))
-        }
+        let call_data = self.intent_contract.encode_intent_locker_call(intent_id);
+        let result = self.client.call_contract(self.contract_address, &call_data).await?;
+        self.intent_contract.parse_intent_locker_response(&result)
     }
 
     async fn value_stored_in_intent(&self, intent_id: B256) -> Result<U256> {
-        let intent_id_hex = format!("0x{:064x}", intent_id);
-
-        let result = self.client.call(
-            &format!("0x{:x}", self.contract_address),
-            "valueStoredInIntent(bytes32)",
-            &[&intent_id_hex]
-        ).await?;
-
-        let result_hex = result.trim_start_matches("0x");
-        let value = U256::from_str_radix(result_hex, 16)?;
-        Ok(value)
+        let call_data = self.intent_contract.encode_value_stored_in_intent_call(intent_id);
+        let result = self.client.call_contract(self.contract_address, &call_data).await?;
+        self.intent_contract.parse_value_stored_in_intent_response(&result)
     }
 }

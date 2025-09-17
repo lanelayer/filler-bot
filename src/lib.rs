@@ -2,6 +2,7 @@ pub mod core_lane_client;
 pub mod bitcoin_client;
 pub mod intent_manager;
 pub mod intent_contract;
+pub mod intent_system;
 pub mod filler_bot;
 pub mod test_simulator;
 

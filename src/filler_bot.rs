@@ -1,5 +1,5 @@
 use anyhow::Result;
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, U256, B256};
 use std::sync::Arc;
 use std::str::FromStr;
 use tokio::sync::Mutex;
@@ -10,12 +10,14 @@ use crate::core_lane_client::CoreLaneClient;
 use crate::bitcoin_client::BitcoinClient;
 use crate::intent_manager::{IntentManager, IntentData, IntentStatus};
 use crate::intent_contract::{IntentContract, decode_intent_calldata, IntentCall};
+use crate::intent_system::{IntentSystem, CoreLaneIntentSystem};
 
 pub struct FillerBot {
     core_lane_client: Arc<CoreLaneClient>,
     bitcoin_client: Arc<BitcoinClient>,
     intent_manager: Arc<Mutex<IntentManager>>,
     pub intent_contract: IntentContract,
+    intent_system: CoreLaneIntentSystem,
     exit_marketplace: Address,
     filler_address: Address,
     poll_interval: u64,
@@ -31,11 +33,17 @@ impl FillerBot {
         filler_address: Address,
         poll_interval: u64,
     ) -> Self {
+        let intent_system = CoreLaneIntentSystem::new(
+            (*core_lane_client).clone(),
+            exit_marketplace,
+        );
+
         Self {
             core_lane_client,
             bitcoin_client,
             intent_manager,
             intent_contract: IntentContract::new(exit_marketplace),
+            intent_system,
             exit_marketplace,
             filler_address,
             poll_interval,
@@ -280,12 +288,10 @@ impl FillerBot {
         // Get the current block number for the solve call
         let block_number = self.core_lane_client.get_block_number().await?;
 
-        // Call solveIntent on the Core Lane contract
-        let solve_data = self.core_lane_client.solve_intent(
-            self.exit_marketplace,
-            &intent.intent_id,
-            block_number,
-        ).await?;
+        // Call solveIntent on the Core Lane contract using IntentSystem
+        let intent_id_bytes = B256::from_str(&intent.intent_id)?;
+        let block_number_bytes = block_number.to_le_bytes();
+        let solve_data = self.intent_system.solve_intent(intent_id_bytes, &block_number_bytes).await?;
 
         info!("📞 solveIntent call data: {}", solve_data);
         info!("✅ Intent {} solved at block {}", intent.intent_id, block_number);
@@ -321,11 +327,10 @@ impl FillerBot {
                 continue;
             }
 
-            // Check if the intent is already locked
-            match self.core_lane_client.get_intent_locker(
-                self.exit_marketplace,
-                &intent.intent_id
-            ).await {
+            // Check if the intent is already locked using IntentSystem
+            let intent_id_bytes = B256::from_str(&intent.intent_id)?;
+
+            match self.intent_system.intent_locker(intent_id_bytes).await {
                 Ok(Some(locker)) => {
                     if locker == self.filler_address {
                         info!("🔒 Intent {} already locked by us, proceeding to fulfill", intent.intent_id);
@@ -339,12 +344,8 @@ impl FillerBot {
                 Ok(None) => {
                     info!("🔓 Intent {} not locked, attempting to lock", intent.intent_id);
 
-                    // Try to lock the intent
-                    let lock_data = self.core_lane_client.lock_intent_for_solving(
-                        self.exit_marketplace,
-                        &intent.intent_id,
-                    ).await?;
-
+                    // Try to lock the intent using IntentSystem
+                    let lock_data = self.intent_system.lock_intent_for_solving(intent_id_bytes, b"").await?;
                     info!("📞 lockIntentForSolving call data: {}", lock_data);
 
                     // For now, we'll assume the lock was successful

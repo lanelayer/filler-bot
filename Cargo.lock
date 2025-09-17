@@ -2387,6 +2387,7 @@ dependencies = [
  "alloy-sol-types",
  "alloy-transport",
  "anyhow",
+ "async-trait",
  "bitcoin 0.31.2",
  "bitcoincore-rpc",
  "bs58",
