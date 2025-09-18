@@ -3,6 +3,7 @@ pub mod bitcoin_client;
 pub mod intent_manager;
 pub mod intent_contract;
 pub mod intent_system;
+pub mod intent_types;
 pub mod filler_bot;
 pub mod test_simulator;
 
@@ -13,5 +14,6 @@ pub use intent_contract::{
     IntentContract, IntentSystemInterface, IntentCall,
     decode_intent_calldata, calculate_intent_id, get_transaction_input_bytes, get_transaction_nonce
 };
+pub use intent_types::{IntentData, IntentType, AnchorBitcoinFill, create_anchor_bitcoin_fill_intent};
 pub use filler_bot::FillerBot;
 pub use test_simulator::SimulatorTester;

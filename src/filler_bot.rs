@@ -11,6 +11,7 @@ use crate::bitcoin_client::BitcoinClient;
 use crate::intent_manager::{IntentManager, IntentData, IntentStatus};
 use crate::intent_contract::{IntentContract, decode_intent_calldata, IntentCall};
 use crate::intent_system::{IntentSystem, CoreLaneIntentSystem};
+use crate::intent_types::{IntentData as CborIntentData, IntentType};
 
 pub struct FillerBot {
     core_lane_client: Arc<CoreLaneClient>,
@@ -113,6 +114,9 @@ impl FillerBot {
 
         *last_block_number = current_block;
 
+        // Process any pending intents
+        self.process_pending_intents().await?;
+
         // Process any fulfilled intents
         self.process_fulfilled_intents().await?;
 
@@ -172,8 +176,11 @@ impl FillerBot {
         if let Some(intent_call) = decode_intent_calldata(&input_data) {
             match intent_call {
                 IntentCall::Intent { intent_data, nonce } => {
-                    // Parse Bitcoin address from intent data
-                    let btc_destination = self.parse_bitcoin_address_from_input(&intent_data)?;
+                    // Parse CBOR intent data
+                    let cbor_intent = CborIntentData::from_cbor(&intent_data)?;
+
+                    // Parse Bitcoin address from CBOR intent data
+                    let btc_destination = self.parse_bitcoin_address_from_cbor_intent(&cbor_intent)?;
 
                     // Calculate intent ID using the same method as core-lane
                     let from = Address::from_str(&tx.from)?;
@@ -199,6 +206,16 @@ impl FillerBot {
         }
 
         Ok(None)
+    }
+
+    /// Parse Bitcoin address from CBOR intent data
+    pub fn parse_bitcoin_address_from_cbor_intent(&self, cbor_intent: &CborIntentData) -> Result<String> {
+        match cbor_intent.intent_type {
+            IntentType::AnchorBitcoinFill => {
+                let fill_data = cbor_intent.parse_anchor_bitcoin_fill()?;
+                fill_data.parse_bitcoin_address()
+            }
+        }
     }
 
     pub fn parse_bitcoin_address_from_input(&self, input_data: &[u8]) -> Result<String> {
@@ -306,13 +323,53 @@ impl FillerBot {
 
     /// Process pending intents and attempt to fulfill them
     pub async fn process_pending_intents(&self) -> Result<()> {
-        let (pending_intents, available_btc) = {
+        let (pending_intents, awaiting_lock_intents, available_btc) = {
             let manager = self.intent_manager.lock().await;
-            let intents = manager.get_pending_intents().into_iter().cloned().collect::<Vec<_>>();
+            let pending = manager.get_pending_intents().into_iter().cloned().collect::<Vec<_>>();
+            let awaiting_lock = manager.get_intents_by_status(IntentStatus::AwaitingSuccessfulLock).into_iter().cloned().collect::<Vec<_>>();
             let btc = self.bitcoin_client.get_balance().await?;
-            (intents, btc)
+            (pending, awaiting_lock, btc)
         };
 
+        // Process intents awaiting successful lock confirmation
+        for intent in awaiting_lock_intents {
+            info!("⏳ Checking lock status for intent: {}", intent.intent_id);
+
+            let intent_id_bytes = B256::from_str(&intent.intent_id)?;
+            match self.intent_system.intent_locker(intent_id_bytes).await {
+                Ok(Some(locker)) => {
+                    if locker == self.filler_address {
+                        info!("✅ Intent {} successfully locked by us, proceeding to fulfill", intent.intent_id);
+
+                        // Update status to locked
+                        let mut manager = self.intent_manager.lock().await;
+                        manager.update_intent_status(&intent.intent_id, IntentStatus::Locked)?;
+                        drop(manager);
+
+                        // Now fulfill the intent
+                        if let Err(e) = self.fulfill_intent(&intent).await {
+                            error!("Failed to fulfill intent {}: {}", intent.intent_id, e);
+                        }
+                    } else {
+                        info!("🔒 Intent {} locked by another filler: 0x{:x}", intent.intent_id, locker);
+
+                        // Update status to failed since we didn't get the lock
+                        let mut manager = self.intent_manager.lock().await;
+                        manager.update_intent_status(&intent.intent_id, IntentStatus::Failed)?;
+                        drop(manager);
+                    }
+                }
+                Ok(None) => {
+                    info!("⏳ Intent {} still not locked, continuing to wait", intent.intent_id);
+                    // Keep waiting for lock confirmation
+                }
+                Err(e) => {
+                    error!("Failed to check intent locker for {}: {}", intent.intent_id, e);
+                }
+            }
+        }
+
+        // Process new pending intents
         for intent in pending_intents {
             info!("🔄 Processing pending intent: {}", intent.intent_id);
 
@@ -348,16 +405,11 @@ impl FillerBot {
                     let lock_data = self.intent_system.lock_intent_for_solving(intent_id_bytes, b"").await?;
                     info!("📞 lockIntentForSolving call data: {}", lock_data);
 
-                    // For now, we'll assume the lock was successful
-                    // In production, you'd need to actually send the transaction
+                    // Update status to awaiting successful lock
                     let mut manager = self.intent_manager.lock().await;
-                    manager.update_intent_status(&intent.intent_id, IntentStatus::Locked)?;
+                    manager.update_intent_status(&intent.intent_id, IntentStatus::AwaitingSuccessfulLock)?;
                     drop(manager);
 
-                    // Now fulfill the intent
-                    if let Err(e) = self.fulfill_intent(&intent).await {
-                        error!("Failed to fulfill intent {}: {}", intent.intent_id, e);
-                    }
                 }
                 Err(e) => {
                     error!("Failed to check intent locker for {}: {}", intent.intent_id, e);

@@ -20,12 +20,13 @@ pub struct UserIntent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum IntentStatus {
-    Pending,    // Intent detected but not yet locked
-    Locked,     // We've locked the intent for solving
-    Fulfilling, // We're in the process of fulfilling (sent BTC)
-    Fulfilled,  // BTC sent and confirmed, ready to solve
-    Solved,     // Intent solved on Core Lane
-    Failed,     // Something went wrong
+    Pending,                    // Intent detected but not yet locked
+    AwaitingSuccessfulLock,     // We've attempted to lock, waiting for confirmation
+    Locked,                     // We've successfully locked the intent for solving
+    Fulfilling,                 // We're in the process of fulfilling (sent BTC)
+    Fulfilled,                  // BTC sent and confirmed, ready to solve
+    Solved,                     // Intent solved on Core Lane
+    Failed,                     // Something went wrong
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +150,13 @@ impl IntentManager {
         self.active_intents
             .values()
             .filter(|intent| intent.status == IntentStatus::Fulfilled)
+            .collect()
+    }
+
+    pub fn get_intents_by_status(&self, status: IntentStatus) -> Vec<&UserIntent> {
+        self.active_intents
+            .values()
+            .filter(|intent| intent.status == status)
             .collect()
     }
 
