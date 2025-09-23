@@ -30,6 +30,7 @@ struct JsonRpcError {
 pub struct Block {
     pub number: String,
     pub hash: String,
+    #[serde(rename = "parentHash")]
     pub parent_hash: String,
     pub timestamp: String,
     pub transactions: Vec<String>,

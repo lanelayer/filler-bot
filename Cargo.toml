@@ -60,6 +60,9 @@ ethabi = "17.0"
 # Base58 encoding (for Bitcoin addresses)
 bs58 = "0.5"
 
+# CBOR encoding/decoding
+ciborium = "0.2"
+
 # Hashing
 sha2 = "0.10"
 sha3 = "0.10"
