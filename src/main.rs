@@ -14,6 +14,7 @@ use lanelayer_filler_bot::{
     SimulatorTester,
 };
 
+
 #[derive(Parser)]
 #[command(name = "lanelayer-filler-bot")]
 #[command(about = "LaneLayer Filler Bot - Fulfills user intents by exchanging laneBTC for BTC")]
@@ -127,14 +128,13 @@ async fn main() -> Result<()> {
             let filler_addr = filler_address.parse()
                 .map_err(|e| anyhow::anyhow!("Invalid filler address: {}", e))?;
 
-            // Create clients
             let core_lane_client = Arc::new(CoreLaneClient::new(core_lane_url.clone()));
             let bitcoin_client = Arc::new(BitcoinClient::new(
                 bitcoin_rpc_url.clone(),
                 bitcoin_rpc_user.clone(),
                 bitcoin_rpc_password.clone(),
                 bitcoin_wallet.clone(),
-            )?);
+            ).await?);
 
             // Create intent manager
             let intent_manager = Arc::new(Mutex::new(IntentManager::new()));
@@ -168,14 +168,14 @@ async fn main() -> Result<()> {
         Commands::TestBitcoin {
             bitcoin_rpc_url,
             bitcoin_rpc_user,
-            bitcoin_rpc_password
+            bitcoin_rpc_password,
         } => {
             let client = BitcoinClient::new(
                 bitcoin_rpc_url.clone(),
                 bitcoin_rpc_user.clone(),
                 bitcoin_rpc_password.clone(),
                 "test".to_string(),
-            )?;
+            ).await?;
 
             match client.test_connection().await {
                 Ok(block_count) => {

@@ -7,18 +7,34 @@ use tracing::{debug, info, warn};
 pub struct BitcoinClient {
     client: Client,
     wallet_name: String,
+    network: bitcoincore_rpc::bitcoin::Network,
 }
 
 impl BitcoinClient {
-    pub fn new(rpc_url: String, rpc_user: String, rpc_password: String, wallet_name: String) -> Result<Self> {
+    pub async fn new(rpc_url: String, rpc_user: String, rpc_password: String, wallet_name: String) -> Result<Self> {
         let client = Client::new(
             &rpc_url,
             Auth::UserPass(rpc_user, rpc_password),
         )?;
 
+        let blockchain_info: serde_json::Value = client.call("getblockchaininfo", &[])?;
+
+        let network = if let Some(chain) = blockchain_info.get("chain") {
+            match chain.as_str() {
+                Some("main") => bitcoincore_rpc::bitcoin::Network::Bitcoin,
+                Some("test") => bitcoincore_rpc::bitcoin::Network::Testnet,
+                Some("regtest") => bitcoincore_rpc::bitcoin::Network::Regtest,
+                Some(chain) => return Err(anyhow::anyhow!("Unknown chain type: {}", chain)),
+                None => return Err(anyhow::anyhow!("Chain field is not a string")),
+            }
+        } else {
+            return Err(anyhow::anyhow!("No 'chain' field found in getblockchaininfo response"));
+        };
+
         Ok(Self {
             client,
             wallet_name,
+            network,
         })
     }
 
@@ -52,7 +68,7 @@ impl BitcoinClient {
 
         // Parse the address first
         let btc_address = bitcoincore_rpc::bitcoin::Address::from_str(address)?
-            .require_network(bitcoincore_rpc::bitcoin::Network::Signet)?;
+            .require_network(self.network)?;
 
         // Send the transaction using the correct types
         let txid = self.client.send_to_address(
@@ -134,11 +150,12 @@ impl BitcoinClient {
 
     pub async fn get_transaction_confirmations(&self, txid: &bitcoin::Txid) -> Result<u32> {
         let tx_info: serde_json::Value = self.client.call("gettransaction", &[json!(txid.to_string())])?;
-        
+
         if let Some(confirmations) = tx_info.get("confirmations") {
             Ok(confirmations.as_u64().unwrap_or(0) as u32)
         } else {
             Ok(0)
         }
     }
+
 }
