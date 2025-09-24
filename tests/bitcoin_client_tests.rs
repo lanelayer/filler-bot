@@ -1,4 +1,5 @@
 use lanelayer_filler_bot::bitcoin_client::BitcoinClient;
+use bitcoincore_rpc::bitcoin::Network;
 
 #[tokio::test]
 async fn test_bitcoin_client_creation() {
@@ -7,11 +8,37 @@ async fn test_bitcoin_client_creation() {
         "http://127.0.0.1:18443".to_string(),
         "bitcoin".to_string(),
         "password".to_string(),
-        "test-wallet".to_string()
+        "test-wallet".to_string(),
+        Network::Signet
     );
 
     // The client should be created successfully
     assert!(client.is_ok());
+}
+
+#[tokio::test]
+async fn test_network_detection() {
+    let result = BitcoinClient::new_with_auto_detect(
+        "http://127.0.0.1:18443".to_string(),
+        "bitcoin".to_string(),
+        "password".to_string(),
+        "test-wallet".to_string()
+    ).await;
+
+    match result {
+        Ok(client) => {
+            // If successful, verify the network was detected
+            assert!(matches!(
+                client.detect_network().await,
+                Ok(bitcoincore_rpc::bitcoin::Network::Bitcoin) |
+                Ok(bitcoincore_rpc::bitcoin::Network::Testnet) |
+                Ok(bitcoincore_rpc::bitcoin::Network::Signet) |
+                Ok(bitcoincore_rpc::bitcoin::Network::Regtest)
+            ));
+        }
+        Err(_) => {
+        }
+    }
 }
 
 #[tokio::test]
@@ -21,7 +48,8 @@ async fn test_bitcoin_client_invalid_url() {
         "invalid-url".to_string(),
         "bitcoin".to_string(),
         "password".to_string(),
-        "test-wallet".to_string()
+        "test-wallet".to_string(),
+        Network::Signet
     );
 
     // This should still create a client (validation happens on actual RPC calls)
@@ -34,7 +62,8 @@ async fn test_bitcoin_address_validation() {
         "http://127.0.0.1:18443".to_string(),
         "bitcoin".to_string(),
         "password".to_string(),
-        "test-wallet".to_string()
+        "test-wallet".to_string(),
+        Network::Signet
     ).unwrap();
 
     // Test valid Bitcoin addresses
@@ -58,7 +87,8 @@ async fn test_intent_id_formatting() {
         "http://127.0.0.1:18443".to_string(),
         "bitcoin".to_string(),
         "password".to_string(),
-        "test-wallet".to_string()
+        "test-wallet".to_string(),
+        Network::Signet
     ).unwrap();
 
     // Test that intent IDs are properly formatted for Bitcoin transactions

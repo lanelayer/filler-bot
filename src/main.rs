@@ -14,6 +14,16 @@ use lanelayer_filler_bot::{
     SimulatorTester,
 };
 
+fn parse_bitcoin_network(network: &str) -> Result<bitcoincore_rpc::bitcoin::Network> {
+    match network.to_lowercase().as_str() {
+        "mainnet" => Ok(bitcoincore_rpc::bitcoin::Network::Bitcoin),
+        "testnet" => Ok(bitcoincore_rpc::bitcoin::Network::Testnet),
+        "signet" => Ok(bitcoincore_rpc::bitcoin::Network::Signet),
+        "regtest" => Ok(bitcoincore_rpc::bitcoin::Network::Regtest),
+        _ => Err(anyhow::anyhow!("Unknown Bitcoin network: {}. Supported networks: mainnet, testnet, signet, regtest", network)),
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "lanelayer-filler-bot")]
 #[command(about = "LaneLayer Filler Bot - Fulfills user intents by exchanging laneBTC for BTC")]
@@ -45,6 +55,12 @@ enum Commands {
         /// Bitcoin wallet name
         #[arg(long, default_value = "filler-bot")]
         bitcoin_wallet: String,
+
+        #[arg(long, default_value = "signet")]
+        bitcoin_network: String,
+
+        #[arg(long)]
+        auto_detect_network: bool,
 
         /// Exit marketplace address (0x0000000000000000000000000000000000ExitMkT)
         #[arg(long, default_value = "0x0000000000000000000000000000000000000045")]
@@ -79,6 +95,12 @@ enum Commands {
         /// Bitcoin RPC password
         #[arg(long)]
         bitcoin_rpc_password: String,
+
+        #[arg(long, default_value = "signet")]
+        bitcoin_network: String,
+
+        #[arg(long)]
+        auto_detect_network: bool,
     },
 
     /// Test against IntentSystem simulator contract
@@ -115,6 +137,8 @@ async fn main() -> Result<()> {
             bitcoin_rpc_user,
             bitcoin_rpc_password,
             bitcoin_wallet,
+            bitcoin_network,
+            auto_detect_network,
             exit_marketplace,
             filler_address,
             poll_interval,
@@ -129,12 +153,26 @@ async fn main() -> Result<()> {
 
             // Create clients
             let core_lane_client = Arc::new(CoreLaneClient::new(core_lane_url.clone()));
-            let bitcoin_client = Arc::new(BitcoinClient::new(
-                bitcoin_rpc_url.clone(),
-                bitcoin_rpc_user.clone(),
-                bitcoin_rpc_password.clone(),
-                bitcoin_wallet.clone(),
-            )?);
+
+            let bitcoin_client = if *auto_detect_network {
+                info!("Bitcoin network...");
+                Arc::new(BitcoinClient::new_with_auto_detect(
+                    bitcoin_rpc_url.clone(),
+                    bitcoin_rpc_user.clone(),
+                    bitcoin_rpc_password.clone(),
+                    bitcoin_wallet.clone(),
+                ).await?)
+            } else {
+                // Parse Bitcoin network
+                let bitcoin_network = parse_bitcoin_network(&bitcoin_network)?;
+                Arc::new(BitcoinClient::new(
+                    bitcoin_rpc_url.clone(),
+                    bitcoin_rpc_user.clone(),
+                    bitcoin_rpc_password.clone(),
+                    bitcoin_wallet.clone(),
+                    bitcoin_network,
+                )?)
+            };
 
             // Create intent manager
             let intent_manager = Arc::new(Mutex::new(IntentManager::new()));
@@ -168,14 +206,28 @@ async fn main() -> Result<()> {
         Commands::TestBitcoin {
             bitcoin_rpc_url,
             bitcoin_rpc_user,
-            bitcoin_rpc_password
+            bitcoin_rpc_password,
+            bitcoin_network,
+            auto_detect_network
         } => {
-            let client = BitcoinClient::new(
-                bitcoin_rpc_url.clone(),
-                bitcoin_rpc_user.clone(),
-                bitcoin_rpc_password.clone(),
-                "test".to_string(),
-            )?;
+            let client = if *auto_detect_network {
+                info!("Bitcoin network...");
+                BitcoinClient::new_with_auto_detect(
+                    bitcoin_rpc_url.clone(),
+                    bitcoin_rpc_user.clone(),
+                    bitcoin_rpc_password.clone(),
+                    "test".to_string(),
+                ).await?
+            } else {
+                let network = parse_bitcoin_network(&bitcoin_network)?;
+                BitcoinClient::new(
+                    bitcoin_rpc_url.clone(),
+                    bitcoin_rpc_user.clone(),
+                    bitcoin_rpc_password.clone(),
+                    "test".to_string(),
+                    network,
+                )?
+            };
 
             match client.test_connection().await {
                 Ok(block_count) => {
