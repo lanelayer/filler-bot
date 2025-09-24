@@ -11,11 +11,25 @@ pub struct BitcoinClient {
 }
 
 impl BitcoinClient {
-    pub fn new(rpc_url: String, rpc_user: String, rpc_password: String, wallet_name: String, network: bitcoincore_rpc::bitcoin::Network) -> Result<Self> {
+    pub async fn new(rpc_url: String, rpc_user: String, rpc_password: String, wallet_name: String) -> Result<Self> {
         let client = Client::new(
             &rpc_url,
             Auth::UserPass(rpc_user, rpc_password),
         )?;
+
+        let blockchain_info: serde_json::Value = client.call("getblockchaininfo", &[])?;
+
+        let network = if let Some(chain) = blockchain_info.get("chain") {
+            match chain.as_str() {
+                Some("main") => bitcoincore_rpc::bitcoin::Network::Bitcoin,
+                Some("test") => bitcoincore_rpc::bitcoin::Network::Testnet,
+                Some("regtest") => bitcoincore_rpc::bitcoin::Network::Regtest,
+                Some(chain) => return Err(anyhow::anyhow!("Unknown chain type: {}", chain)),
+                None => return Err(anyhow::anyhow!("Chain field is not a string")),
+            }
+        } else {
+            return Err(anyhow::anyhow!("No 'chain' field found in getblockchaininfo response"));
+        };
 
         Ok(Self {
             client,
@@ -144,54 +158,4 @@ impl BitcoinClient {
         }
     }
 
-    /// Detect the Bitcoin network by calling getblockchaininfo
-    pub async fn detect_network(&self) -> Result<bitcoincore_rpc::bitcoin::Network> {
-        let blockchain_info: serde_json::Value = self.client.call("getblockchaininfo", &[])?;
-
-        if let Some(chain) = blockchain_info.get("chain") {
-            match chain.as_str() {
-                Some("main") => Ok(bitcoincore_rpc::bitcoin::Network::Bitcoin),
-                Some("test") => Ok(bitcoincore_rpc::bitcoin::Network::Testnet),
-                Some("regtest") => Ok(bitcoincore_rpc::bitcoin::Network::Regtest),
-                Some(chain) => Err(anyhow::anyhow!("Unknown chain type: {}", chain)),
-                None => Err(anyhow::anyhow!("Chain field is not a string")),
-            }
-        } else {
-            Err(anyhow::anyhow!("No 'chain' field found in getblockchaininfo response"))
-        }
-    }
-
-    /// Create a new BitcoinClient with auto-detected network
-    pub async fn new_with_auto_detect(
-        rpc_url: String,
-        rpc_user: String,
-        rpc_password: String,
-        wallet_name: String
-    ) -> Result<Self> {
-        let client = Client::new(
-            &rpc_url,
-            Auth::UserPass(rpc_user, rpc_password),
-        )?;
-
-        // Detect network by calling getblockchaininfo directly
-        let blockchain_info: serde_json::Value = client.call("getblockchaininfo", &[])?;
-
-        let network = if let Some(chain) = blockchain_info.get("chain") {
-            match chain.as_str() {
-                Some("main") => bitcoincore_rpc::bitcoin::Network::Bitcoin,
-                Some("test") => bitcoincore_rpc::bitcoin::Network::Testnet,
-                Some("regtest") => bitcoincore_rpc::bitcoin::Network::Regtest,
-                Some(chain) => return Err(anyhow::anyhow!("Unknown chain type: {}", chain)),
-                None => return Err(anyhow::anyhow!("Chain field is not a string")),
-            }
-        } else {
-            return Err(anyhow::anyhow!("No 'chain' field found in getblockchaininfo response"));
-        };
-
-        Ok(Self {
-            client,
-            wallet_name,
-            network,
-        })
-    }
 }
