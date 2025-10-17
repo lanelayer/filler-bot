@@ -1,6 +1,6 @@
 use anyhow::Result;
 use bitcoincore_rpc::{Auth, Client, RpcApi};
-use bitcoincore_rpc::bitcoin::{Address, Network, Txid as RpcTxid, Amount as RpcAmount};
+use bitcoincore_rpc::bitcoin::{Address, Network, Txid as RpcTxid, Amount as RpcAmount, ScriptBuf as RpcScriptBuf};
 use bitcoin::Txid;
 use bdk_wallet::keys::{bip39::Mnemonic, DerivableKey, ExtendedKey};
 use bdk_wallet::{KeychainKind, PersistedWallet};
@@ -253,7 +253,10 @@ impl BitcoinClient {
     }
 
 
-    /// Send Bitcoin to an address
+    /// Send Bitcoin to an address with intent_id tag (tagged fill)
+    /// Creates a transaction with exactly 2 outputs:
+    /// - Output 0: Payment to user's Bitcoin address
+    /// - Output 1: OP_RETURN with 32-byte intent_id tag
     pub async fn send_to_address(&mut self, address: &str, amount_sats: u64, intent_id: &str) -> Result<String> {
         info!(
             "💰 Sending {} sats ({:.8} BTC) to {} for intent {}",
@@ -269,10 +272,33 @@ impl BitcoinClient {
             .require_network(self.network)
             .map_err(|e| anyhow::anyhow!("Address network mismatch: {}", e))?;
 
-        // Build transaction
+        // Parse intent_id (remove 0x prefix if present)
+        let intent_id_hex = intent_id.trim_start_matches("0x");
+        let intent_id_bytes = hex::decode(intent_id_hex)
+            .map_err(|e| anyhow::anyhow!("Invalid intent_id hex: {}", e))?;
+        
+        if intent_id_bytes.len() != 32 {
+            return Err(anyhow::anyhow!("Intent ID must be exactly 32 bytes, got {} bytes", intent_id_bytes.len()));
+        }
+
+        // Build OP_RETURN script with intent_id manually
+        // OP_RETURN (0x6a) + pushdata32 (0x20) + 32 bytes of intent_id
+        let mut op_return_bytes = Vec::new();
+        op_return_bytes.push(0x6a); // OP_RETURN
+        op_return_bytes.push(0x20); // Push 32 bytes
+        op_return_bytes.extend_from_slice(&intent_id_bytes);
+
+        // Convert to bitcoincore_rpc ScriptBuf
+        let rpc_op_return_script = RpcScriptBuf::from(op_return_bytes);
+
+        // Build transaction with both outputs
         let mut tx_builder = self.wallet.build_tx();
-        tx_builder
-            .add_recipient(dest_address.script_pubkey(), RpcAmount::from_sat(amount_sats));
+        
+        // Output 0: Payment to user
+        tx_builder.add_recipient(dest_address.script_pubkey(), RpcAmount::from_sat(amount_sats));
+        
+        // Output 1: OP_RETURN with intent_id tag
+        tx_builder.add_recipient(rpc_op_return_script, RpcAmount::from_sat(0));
 
         let mut psbt = tx_builder.finish()
             .map_err(|e| anyhow::anyhow!("Failed to build transaction: {}", e))?;
@@ -290,6 +316,11 @@ impl BitcoinClient {
             .map_err(|e| anyhow::anyhow!("Failed to extract transaction: {}", e))?;
 
         let txid = tx.compute_txid();
+
+        // Verify transaction has exactly 2 outputs as expected by Core Lane
+        if tx.output.len() != 2 {
+            return Err(anyhow::anyhow!("Transaction must have exactly 2 outputs, got {}", tx.output.len()));
+        }
 
         // Broadcast transaction via configured backend
         match &self.backend {
@@ -311,6 +342,8 @@ impl BitcoinClient {
         }
 
         info!("📍 Transaction ID: {}", txid);
+        info!("🏷️  Tagged with intent_id: {} (32 bytes)", intent_id);
+        info!("📤 Transaction structure: {} outputs (payment + OP_RETURN tag)", tx.output.len());
         Ok(txid.to_string())
     }
 
