@@ -85,11 +85,21 @@ cargo build --release
 ```bash
 # Start the filler bot
 ./target/release/lanelayer-filler-bot start \
-  --core-lane-url "http://127.0.0.1:8545" \
+  --core-lane-url "http://127.0.0.1:8546" \
+  --bitcoin-backend "rpc" \
   --bitcoin-rpc-url "http://127.0.0.1:18443" \
   --bitcoin-rpc-password "bitcoin123" \
   --filler-address "0x1234567890123456789012345678901234567890" \
-  --intent-contract "0x0000000000000000000000000000000000000045"
+  --exit-marketplace "0x0000000000000000000000000000000000000045" \
+  --bitcoin-mnemonic "your_mnemonic_phrase_here" \
+  --bitcoin-wallet "bot_wallet"
+```
+
+### Fund the Bot
+
+```bash
+# Fund the bot's float address with BTC (replace with actual address from bot logs)
+docker exec -it bitcoin-regtest bitcoin-cli -regtest -rpcuser=bitcoin -rpcpassword=bitcoin123 generatetoaddress 101 "your_float_address_here"
 ```
 
 ### Test Connections
