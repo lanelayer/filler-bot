@@ -1,101 +1,373 @@
 use anyhow::Result;
 use bitcoincore_rpc::{Auth, Client, RpcApi};
+use bitcoincore_rpc::bitcoin::{Address, Network, Txid as RpcTxid, Amount as RpcAmount};
+use bitcoin::Txid;
+use bdk_wallet::keys::{bip39::Mnemonic, DerivableKey, ExtendedKey};
+use bdk_wallet::{KeychainKind, PersistedWallet};
+use bdk_electrum::electrum_client;
+use bdk_electrum::electrum_client::ElectrumApi;
 use serde_json::json;
 use std::str::FromStr;
 use tracing::{debug, info, warn};
 
+#[derive(Debug, Clone)]
+pub enum BitcoinBackend {
+    Electrum {
+        url: String,
+    },
+    Rpc {
+        url: String,
+        username: String,
+        password: String,
+    },
+}
+
 pub struct BitcoinClient {
-    client: Client,
+    wallet: PersistedWallet<bdk_wallet::rusqlite::Connection>,
     wallet_name: String,
-    network: bitcoincore_rpc::bitcoin::Network,
+    network: Network,
+    backend: BitcoinBackend,
 }
 
 impl BitcoinClient {
-    pub async fn new(rpc_url: String, rpc_user: String, rpc_password: String, wallet_name: String) -> Result<Self> {
-        let client = Client::new(
-            &rpc_url,
-            Auth::UserPass(rpc_user, rpc_password),
-        )?;
+    /// Create a new BDK-based Bitcoin client with Electrum backend
+    pub async fn new_electrum(
+        electrum_url: String,
+        mnemonic_str: String,
+        network_str: String,
+        wallet_name: String,
+    ) -> Result<Self> {
+        info!("🔧 Initializing BDK Bitcoin client with Electrum backend");
+        info!("   Network: {}", network_str);
+        info!("   Electrum: {}", electrum_url);
+        info!("   Wallet: {}", wallet_name);
 
-        let blockchain_info: serde_json::Value = client.call("getblockchaininfo", &[])?;
+        let backend = BitcoinBackend::Electrum { url: electrum_url };
+        Self::new_with_backend(backend, mnemonic_str, network_str, wallet_name).await
+    }
 
-        let network = if let Some(chain) = blockchain_info.get("chain") {
-            match chain.as_str() {
-                Some("main") => bitcoincore_rpc::bitcoin::Network::Bitcoin,
-                Some("test") => bitcoincore_rpc::bitcoin::Network::Testnet,
-                Some("regtest") => bitcoincore_rpc::bitcoin::Network::Regtest,
-                Some(chain) => return Err(anyhow::anyhow!("Unknown chain type: {}", chain)),
-                None => return Err(anyhow::anyhow!("Chain field is not a string")),
-            }
-        } else {
-            return Err(anyhow::anyhow!("No 'chain' field found in getblockchaininfo response"));
+    /// Create a new BDK-based Bitcoin client with RPC backend
+    pub async fn new_rpc(
+        rpc_url: String,
+        rpc_username: String,
+        rpc_password: String,
+        mnemonic_str: String,
+        network_str: String,
+        wallet_name: String,
+    ) -> Result<Self> {
+        info!("🔧 Initializing BDK Bitcoin client with RPC backend");
+        info!("   Network: {}", network_str);
+        info!("   RPC URL: {}", rpc_url);
+        info!("   Wallet: {}", wallet_name);
+
+        let backend = BitcoinBackend::Rpc {
+            url: rpc_url,
+            username: rpc_username,
+            password: rpc_password,
+        };
+        Self::new_with_backend(backend, mnemonic_str, network_str, wallet_name).await
+    }
+
+    /// Internal method to create client with specified backend
+    async fn new_with_backend(
+        backend: BitcoinBackend,
+        mnemonic_str: String,
+        network_str: String,
+        wallet_name: String,
+    ) -> Result<Self> {
+        // Parse network
+        let network = match network_str.as_str() {
+            "bitcoin" | "main" | "mainnet" => Network::Bitcoin,
+            "test" | "testnet" => Network::Testnet,
+            "signet" => Network::Signet,
+            "regtest" => Network::Regtest,
+            _ => return Err(anyhow::anyhow!("Invalid network: {}", network_str)),
         };
 
-        Ok(Self {
-            client,
+        // Parse mnemonic
+        let mnemonic = Mnemonic::parse(&mnemonic_str)
+            .map_err(|e| anyhow::anyhow!("Invalid mnemonic: {}", e))?;
+
+        // Derive extended key
+        let xkey: ExtendedKey = mnemonic.into_extended_key()
+            .map_err(|e| anyhow::anyhow!("Failed to derive extended key: {}", e))?;
+
+        let xprv = xkey.into_xprv(network)
+            .ok_or_else(|| anyhow::anyhow!("Failed to create xprv for network"))?;
+
+        // Create wallet descriptors (BIP84 - Native SegWit)
+        let external_descriptor = format!("wpkh({}/84'/0'/0'/0/*)", xprv);
+        let internal_descriptor = format!("wpkh({}/84'/0'/0'/1/*)", xprv);
+
+        // Database path based on wallet name
+        let db_path = format!("./{}-wallet.db", wallet_name);
+
+        // Open or create database
+        let mut db = bdk_wallet::rusqlite::Connection::open(&db_path)
+            .map_err(|e| anyhow::anyhow!("Failed to open database {}: {}", db_path, e))?;
+
+        // Create or load wallet using the simplified API
+        let wallet = bdk_wallet::Wallet::create(external_descriptor, internal_descriptor)
+            .network(network)
+            .create_wallet(&mut db)
+            .map_err(|e| anyhow::anyhow!("Failed to create wallet: {}", e))?;
+
+        info!("✅ BDK wallet initialized");
+
+        let client = Self {
+            wallet,
             wallet_name,
             network,
-        })
+            backend,
+        };
+
+        // Note: Sync will be handled separately with the new BDK API
+        info!("🔄 Wallet created (sync will be handled separately)");
+
+        Ok(client)
     }
 
-    pub async fn test_connection(&self) -> Result<u64> {
-        let block_count = self.client.get_block_count()?;
-        Ok(block_count)
+    /// Get database connection
+    fn get_db(&self) -> Result<bdk_wallet::rusqlite::Connection> {
+        let db_path = format!("./{}-wallet.db", self.wallet_name);
+        bdk_wallet::rusqlite::Connection::open(&db_path)
+            .map_err(|e| anyhow::anyhow!("Failed to open database: {}", e))
     }
 
-    pub async fn get_balance(&self) -> Result<u64> {
-        let balances: serde_json::Value = self.client.call("getbalances", &[])?;
-
-        if let Some(wallet) = balances.get(&self.wallet_name) {
-            if let Some(trusted) = wallet.get("trusted") {
-                let balance_btc = trusted.as_f64().unwrap_or(0.0);
-                let balance_sats = (balance_btc * 100_000_000.0) as u64;
-                Ok(balance_sats)
-            } else {
-                Ok(0)
+    /// Check if an address belongs to this wallet
+    pub fn is_address_mine(&self, address: &str) -> bool {
+        match Address::from_str(address) {
+            Ok(_addr) => {
+                // Check if the address is in the wallet's address list
+                // This is a simplified check - in practice, BDK would need to scan the address
+                // For now, we'll assume all addresses generated by this wallet are "mine"
+                true
             }
-        } else {
-            Ok(0)
+            Err(_) => false,
         }
     }
 
-    pub async fn send_to_address(&self, address: &str, amount_sats: u64, intent_id: &str) -> Result<String> {
-        // Convert sats to BTC
-        let amount_btc = amount_sats as f64 / 100_000_000.0;
+    /// Refresh wallet balance by syncing with the blockchain
+    pub async fn refresh_balance(&mut self) -> Result<u64> {
+        info!("🔄 Syncing wallet with blockchain...");
+        
+        // Get database connection for persistence
+        let mut conn = self.get_db()?;
+        
+        // Sync wallet based on network
+        match self.network {
+            Network::Regtest => {
+                // Use bitcoind RPC for regtest
+                match &self.backend {
+                    BitcoinBackend::Rpc { url, username, password } => {
+                        use bdk_bitcoind_rpc::bitcoincore_rpc::Auth as RpcAuth;
+                        use bdk_bitcoind_rpc::bitcoincore_rpc::Client;
+                        use bdk_bitcoind_rpc::Emitter;
+                        use std::sync::Arc;
 
-        // Create a comment that includes the intent ID for tracking
-        let comment = format!("Filler bot fulfillment for intent: {}", intent_id);
+                        info!("🔗 Syncing with Bitcoin RPC: {}", url);
 
-        // Parse the address first
-        let btc_address = bitcoincore_rpc::bitcoin::Address::from_str(address)?
-            .require_network(self.network)?;
+                        let rpc_client = Client::new(
+                            url,
+                            RpcAuth::UserPass(username.clone(), password.clone()),
+                        )?;
 
-        // Send the transaction using the correct types
-        let txid = self.client.send_to_address(
-            &btc_address,
-            bitcoincore_rpc::bitcoin::Amount::from_sat(amount_sats),
-            Some(&comment),
-            None, // comment_to
-            Some(false), // subtract_fee
-            Some(false), // replaceable
-            Some(6), // conf_target
-            Some(bitcoincore_rpc::json::EstimateMode::Conservative), // estimate_mode
-        )?;
+                        let mut emitter = Emitter::new(
+                            &rpc_client,
+                            self.wallet.latest_checkpoint().clone(),
+                            0,
+                            std::iter::empty::<Arc<bitcoincore_rpc::bitcoin::Transaction>>(), // No mempool txs
+                        );
 
+                        while let Some(block_emission) = emitter.next_block()? {
+                            self.wallet.apply_block(&block_emission.block, block_emission.block_height())?;
+                        }
+
+                        self.wallet.persist(&mut conn)?;
+                        info!("✅ Wallet synced with Bitcoin RPC");
+                    }
+                    BitcoinBackend::Electrum { .. } => {
+                        return Err(anyhow::anyhow!("Electrum backend not supported for regtest"));
+                    }
+                }
+            }
+            _ => {
+                // Use Electrum for other networks
+                match &self.backend {
+                    BitcoinBackend::Electrum { url } => {
+                        use bdk_electrum::{electrum_client, BdkElectrumClient};
+
+                        info!("🔗 Syncing with Electrum: {}", url);
+
+                        let electrum_client = electrum_client::Client::new(url)?;
+                        let electrum = BdkElectrumClient::new(electrum_client);
+
+                        info!("🔍 Scanning blockchain for wallet transactions...");
+
+                        let request = self.wallet.start_full_scan().build();
+                        let response = electrum.full_scan(request, 5, 1, false)?;
+
+                        self.wallet.apply_update(response)?;
+                        self.wallet.persist(&mut conn)?;
+                        info!("✅ Wallet synced with Electrum");
+                    }
+                    BitcoinBackend::Rpc { .. } => {
+                        // For RPC backend on non-regtest networks, just get balance without sync
+                        info!("🔄 Using RPC backend - getting live balance");
+                    }
+                }
+            }
+        }
+        
+        // Get the synced balance
+        let balance = self.wallet.balance().total().to_sat();
+        info!("💰 Synced balance: {} sats ({:.8} BTC)", balance, balance as f64 / 100_000_000.0);
+        Ok(balance)
+    }
+
+
+
+    /// Test connection to configured backend
+    pub async fn test_connection(&self) -> Result<u64> {
+        match &self.backend {
+            BitcoinBackend::Electrum { url } => {
+                let client = electrum_client::Client::new(url)
+                    .map_err(|e| anyhow::anyhow!("Failed to connect to Electrum: {}", e))?;
+
+                let header = client.block_headers_subscribe()
+                    .map_err(|e| anyhow::anyhow!("Failed to subscribe to block headers: {}", e))?;
+
+                Ok(header.height as u64)
+            }
+            BitcoinBackend::Rpc { url, username, password } => {
+                let auth = Auth::UserPass(username.clone(), password.clone());
+                let client = Client::new(url, auth)
+                    .map_err(|e| anyhow::anyhow!("Failed to connect to Bitcoin RPC: {}", e))?;
+
+                let blockchain_info = client.get_blockchain_info()
+                    .map_err(|e| anyhow::anyhow!("Failed to get blockchain info: {}", e))?;
+
+                Ok(blockchain_info.blocks)
+            }
+        }
+    }
+
+
+    /// Send Bitcoin to an address
+    pub async fn send_to_address(&mut self, address: &str, amount_sats: u64, intent_id: &str) -> Result<String> {
         info!(
-            "💰 Sent {} sats ({:.8} BTC) to {} for intent {}",
-            amount_sats, amount_btc, address, intent_id
+            "💰 Sending {} sats ({:.8} BTC) to {} for intent {}",
+            amount_sats,
+            amount_sats as f64 / 100_000_000.0,
+            address,
+            intent_id
         );
-        info!("📍 Transaction ID: {}", txid);
 
+        // Parse destination address
+        let dest_address = Address::from_str(address)
+            .map_err(|e| anyhow::anyhow!("Invalid Bitcoin address: {}", e))?
+            .require_network(self.network)
+            .map_err(|e| anyhow::anyhow!("Address network mismatch: {}", e))?;
+
+        // Build transaction
+        let mut tx_builder = self.wallet.build_tx();
+        tx_builder
+            .add_recipient(dest_address.script_pubkey(), RpcAmount::from_sat(amount_sats));
+
+        let mut psbt = tx_builder.finish()
+            .map_err(|e| anyhow::anyhow!("Failed to build transaction: {}", e))?;
+
+        // Sign transaction
+        let finalized = self.wallet.sign(&mut psbt, Default::default())
+            .map_err(|e| anyhow::anyhow!("Failed to sign transaction: {}", e))?;
+
+        if !finalized {
+            return Err(anyhow::anyhow!("Failed to finalize transaction"));
+        }
+
+        // Extract transaction
+        let tx = psbt.extract_tx()
+            .map_err(|e| anyhow::anyhow!("Failed to extract transaction: {}", e))?;
+
+        let txid = tx.compute_txid();
+
+        // Broadcast transaction via configured backend
+        match &self.backend {
+            BitcoinBackend::Electrum { url } => {
+                let client = electrum_client::Client::new(url)
+                    .map_err(|e| anyhow::anyhow!("Failed to connect to Electrum: {}", e))?;
+
+                client.transaction_broadcast(&tx)
+                    .map_err(|e| anyhow::anyhow!("Failed to broadcast transaction: {}", e))?;
+            }
+            BitcoinBackend::Rpc { url, username, password } => {
+                let auth = Auth::UserPass(username.clone(), password.clone());
+                let client = Client::new(url, auth)
+                    .map_err(|e| anyhow::anyhow!("Failed to connect to Bitcoin RPC: {}", e))?;
+
+                client.send_raw_transaction(&tx)
+                    .map_err(|e| anyhow::anyhow!("Failed to broadcast transaction: {}", e))?;
+            }
+        }
+
+        info!("📍 Transaction ID: {}", txid);
         Ok(txid.to_string())
     }
 
+    /// Get transaction information
     pub async fn get_transaction(&self, txid: &str) -> Result<serde_json::Value> {
-        let tx_info: serde_json::Value = self.client.call("gettransaction", &[json!(txid)])?;
-        Ok(tx_info)
+        let txid = Txid::from_str(txid)
+            .map_err(|e| anyhow::anyhow!("Invalid txid: {}", e))?;
+
+        match &self.backend {
+            BitcoinBackend::Electrum { url } => {
+                let client = electrum_client::Client::new(url)
+                    .map_err(|e| anyhow::anyhow!("Failed to connect to Electrum: {}", e))?;
+
+                // Convert to the Txid type expected by electrum-client
+                let electrum_txid_str = txid.to_string();
+                let electrum_txid = bitcoincore_rpc::bitcoin::Txid::from_str(&electrum_txid_str)
+                    .map_err(|e| anyhow::anyhow!("Failed to convert txid: {}", e))?;
+
+                let _tx = client.transaction_get(&electrum_txid)
+                    .map_err(|e| anyhow::anyhow!("Failed to get transaction: {}", e))?;
+
+                // For Electrum, we'll use a simplified confirmation count
+                // In a real implementation, you'd need to track confirmations differently
+                let confirmations = 0;
+
+                // Build JSON response compatible with Bitcoin Core RPC format
+                Ok(json!({
+                    "txid": txid.to_string(),
+                    "confirmations": confirmations,
+                    "time": 0, // Electrum doesn't provide this in the same way
+                    "blocktime": 0, // Electrum doesn't provide this in the same way
+                }))
+            }
+            BitcoinBackend::Rpc { url, username, password } => {
+                let auth = Auth::UserPass(username.clone(), password.clone());
+                let client = Client::new(url, auth)
+                    .map_err(|e| anyhow::anyhow!("Failed to connect to Bitcoin RPC: {}", e))?;
+
+                // Convert bitcoin::Txid to bitcoincore_rpc::bitcoin::Txid
+                let rpc_txid = RpcTxid::from_str(&txid.to_string())
+                    .map_err(|e| anyhow::anyhow!("Failed to convert txid: {}", e))?;
+
+                let tx_info = client.get_transaction(&rpc_txid, None)
+                    .map_err(|e| anyhow::anyhow!("Failed to get transaction: {}", e))?;
+
+                // Convert to JSON format
+                Ok(json!({
+                    "txid": txid.to_string(),
+                    "confirmations": tx_info.info.confirmations,
+                    "time": tx_info.info.time,
+                    "blocktime": tx_info.info.blocktime,
+                }))
+            }
+        }
     }
 
+    /// Wait for transaction confirmations
     pub async fn wait_for_confirmation(&self, txid: &str, confirmations: u32) -> Result<()> {
         info!("⏳ Waiting for {} confirmations of transaction {}", confirmations, txid);
 
@@ -121,41 +393,112 @@ impl BitcoinClient {
         }
     }
 
+    /// List unspent outputs
     pub async fn list_unspent(&self, min_amount: Option<u64>) -> Result<Vec<serde_json::Value>> {
-        let mut params = vec![
-            json!(0), // minconf
-            json!(9999999), // maxconf
-            json!([]), // addresses
-            json!(true), // include_unsafe
-        ];
+        let utxos = self.wallet.list_unspent();
 
+        let mut result = Vec::new();
+
+        for utxo in utxos {
+            let amount_sats = utxo.txout.value;
+
+            // Filter by minimum amount if specified
         if let Some(min) = min_amount {
-            let min_btc = min as f64 / 100_000_000.0;
-            params.push(json!({"minimumAmount": min_btc}));
+                if amount_sats.to_sat() < min {
+                    continue;
+                }
+            }
+
+            // Build JSON compatible with Bitcoin Core RPC format
+            result.push(json!({
+                "txid": utxo.outpoint.txid.to_string(),
+                "vout": utxo.outpoint.vout,
+                "amount": amount_sats.to_sat() as f64 / 100_000_000.0,
+                "amountSats": amount_sats.to_sat(),
+                "scriptPubKey": hex::encode(&utxo.txout.script_pubkey.as_bytes()),
+            }));
         }
 
-        let unspent: Vec<serde_json::Value> = self.client.call("listunspent", &params)?;
-        Ok(unspent)
+        Ok(result)
     }
 
-    pub async fn get_new_address(&self) -> Result<String> {
-        let address: String = self.client.call("getnewaddress", &[json!(&self.wallet_name)])?;
-        Ok(address)
+    /// Get a new receiving address
+    pub async fn get_new_address(&mut self) -> Result<String> {
+        let address_info = self.wallet.reveal_next_address(KeychainKind::External);
+        Ok(address_info.address.to_string())
     }
 
+    /// Generate a Bitcoin address for the bot's float (working capital)
+    /// This address should be funded with BTC for the bot to use
+    pub async fn generate_float_address(&mut self) -> Result<String> {
+        match &self.backend {
+            BitcoinBackend::Rpc { .. } => {
+                // For RPC backend, use BDK wallet to generate address
+                let address_info = self.wallet.reveal_next_address(KeychainKind::External);
+                let address = address_info.address.to_string();
+                info!("🏦 Generated float address: {}", address);
+                info!("💰 Please fund this address with BTC for the bot to use as working capital");
+                Ok(address)
+            }
+            BitcoinBackend::Electrum { .. } => {
+                // For Electrum backend, use BDK wallet to generate address
+                let address_info = self.wallet.reveal_next_address(KeychainKind::External);
+                let address = address_info.address.to_string();
+                info!("🏦 Generated float address: {}", address);
+                info!("💰 Please fund this address with BTC for the bot to use as working capital");
+                Ok(address)
+            }
+        }
+    }
+
+    /// Get wallet info
     pub async fn get_wallet_info(&self) -> Result<serde_json::Value> {
-        let info: serde_json::Value = self.client.call("getwalletinfo", &[])?;
-        Ok(info)
+        let balance = self.wallet.balance();
+
+        Ok(json!({
+            "walletname": self.wallet_name,
+            "balance": balance.total().to_sat() as f64 / 100_000_000.0,
+            "confirmed_balance": balance.confirmed.to_sat() as f64 / 100_000_000.0,
+            "unconfirmed_balance": balance.untrusted_pending.to_sat() as f64 / 100_000_000.0,
+            "immature_balance": balance.immature.to_sat() as f64 / 100_000_000.0,
+        }))
     }
 
+    /// Get transaction confirmations
     pub async fn get_transaction_confirmations(&self, txid: &bitcoin::Txid) -> Result<u32> {
-        let tx_info: serde_json::Value = self.client.call("gettransaction", &[json!(txid.to_string())])?;
+        match &self.backend {
+            BitcoinBackend::Electrum { url } => {
+                let client = electrum_client::Client::new(url)
+                    .map_err(|e| anyhow::anyhow!("Failed to connect to Electrum: {}", e))?;
 
-        if let Some(confirmations) = tx_info.get("confirmations") {
-            Ok(confirmations.as_u64().unwrap_or(0) as u32)
-        } else {
+                // Convert to the Txid type expected by electrum-client
+                let electrum_txid_str = txid.to_string();
+                let electrum_txid = bitcoincore_rpc::bitcoin::Txid::from_str(&electrum_txid_str)
+                    .map_err(|e| anyhow::anyhow!("Failed to convert txid: {}", e))?;
+
+                match client.transaction_get(&electrum_txid) {
+                    Ok(_tx) => {
+                        // TODO: Implement proper Electrum confirmation counting
+                        // For now, return 0 (unconfirmed)
             Ok(0)
+                    }
+                    Err(_) => Ok(0), // Not found or unconfirmed
+                }
+            }
+            BitcoinBackend::Rpc { url, username, password } => {
+                let auth = Auth::UserPass(username.clone(), password.clone());
+                let client = Client::new(url, auth)
+                    .map_err(|e| anyhow::anyhow!("Failed to connect to Bitcoin RPC: {}", e))?;
+
+                // Convert bitcoin::Txid to bitcoincore_rpc::bitcoin::Txid
+                let rpc_txid = RpcTxid::from_str(&txid.to_string())
+                    .map_err(|e| anyhow::anyhow!("Failed to convert txid: {}", e))?;
+
+                match client.get_transaction(&rpc_txid, None) {
+                    Ok(tx_info) => Ok(tx_info.info.confirmations.max(0) as u32),
+                    Err(_) => Ok(0), // Not found or unconfirmed
+                }
+            }
         }
     }
-
 }

@@ -15,7 +15,7 @@ use crate::intent_types::{IntentData as CborIntentData, IntentType};
 
 pub struct FillerBot {
     core_lane_client: Arc<CoreLaneClient>,
-    bitcoin_client: Arc<BitcoinClient>,
+    bitcoin_client: Arc<Mutex<BitcoinClient>>,
     intent_manager: Arc<Mutex<IntentManager>>,
     pub intent_contract: IntentContract,
     intent_system: CoreLaneIntentSystem,
@@ -28,7 +28,7 @@ pub struct FillerBot {
 impl FillerBot {
     pub fn new(
         core_lane_client: Arc<CoreLaneClient>,
-        bitcoin_client: Arc<BitcoinClient>,
+        bitcoin_client: Arc<Mutex<BitcoinClient>>,
         intent_manager: Arc<Mutex<IntentManager>>,
         exit_marketplace: Address,
         filler_address: Address,
@@ -85,10 +85,26 @@ impl FillerBot {
         let core_lane_block = self.core_lane_client.get_block_number().await?;
         info!("✅ Core Lane connected - Latest block: {}", core_lane_block);
 
-        // Test Bitcoin connection
-        let bitcoin_balance = self.bitcoin_client.get_balance().await?;
-        info!("✅ Bitcoin connected - Balance: {} sats ({:.8} BTC)",
+        // Test Bitcoin connection and generate float address
+        let mut bitcoin_client = self.bitcoin_client.lock().await;
+        let bitcoin_balance = bitcoin_client.refresh_balance().await?;
+        info!("✅ Bitcoin connected - Wallet Balance: {} sats ({:.8} BTC)",
               bitcoin_balance, bitcoin_balance as f64 / 100_000_000.0);
+
+        // Generate and display float address for funding
+        let float_address = bitcoin_client.generate_float_address().await?;
+        
+        // Use the synced wallet balance instead of individual address balance
+        info!("📍 Wallet Balance (synced): {} sats ({:.8} BTC)", 
+              bitcoin_balance, bitcoin_balance as f64 / 100_000_000.0);
+        
+        info!("");
+        info!("🏦 ===== BOT FUNDING ADDRESS =====");
+        info!("📍 Float Address: {}", float_address);
+        info!("💰 Wallet Balance: {} sats ({:.8} BTC)", bitcoin_balance, bitcoin_balance as f64 / 100_000_000.0);
+        info!("💡 Send BTC to this address to fund the bot's working capital");
+        info!("🏦 ================================");
+        info!("");
 
         Ok(())
     }
@@ -120,6 +136,31 @@ impl FillerBot {
         // Process any fulfilled intents
         self.process_fulfilled_intents().await?;
 
+        // Check balance and warn if low
+        self.check_balance().await?;
+
+        Ok(())
+    }
+
+    /// Check bot balance and warn if it's low (with blockchain sync)
+    async fn check_balance(&self) -> Result<()> {
+        let mut bitcoin_client = self.bitcoin_client.lock().await;
+        
+        // Sync with blockchain and get fresh balance
+        let balance = bitcoin_client.refresh_balance().await?;
+        
+        // Define low balance threshold (e.g., 100,000 sats = 0.001 BTC)
+        let low_balance_threshold = 100_000; // 0.001 BTC
+        
+        if balance < low_balance_threshold {
+            warn!("⚠️  LOW BALANCE WARNING!");
+            warn!("💰 Current balance: {} sats ({:.8} BTC)", balance, balance as f64 / 100_000_000.0);
+            warn!("💡 Please fund the bot's float address to continue operations");
+            warn!("🏦 Minimum recommended: {} sats ({:.8} BTC)", low_balance_threshold, low_balance_threshold as f64 / 100_000_000.0);
+        } else {
+            debug!("💰 Balance check: {} sats ({:.8} BTC) - OK", balance, balance as f64 / 100_000_000.0);
+        }
+        
         Ok(())
     }
 
@@ -130,6 +171,13 @@ impl FillerBot {
         let block = self.core_lane_client.get_block_by_number(block_number, true).await?;
 
         info!("📦 Block {} has {} transactions", block_number, block.transactions.len());
+
+        // Sync and print balance for every block
+        let mut bitcoin_client = self.bitcoin_client.lock().await;
+        let balance = bitcoin_client.refresh_balance().await?;
+        info!("💰 Bot Balance at Block {} (synced): {} sats ({:.8} BTC)", 
+              block_number, balance, balance as f64 / 100_000_000.0);
+        drop(bitcoin_client);
 
         // Process each transaction in the block
         for tx_hash in &block.transactions {
@@ -327,7 +375,12 @@ impl FillerBot {
             let manager = self.intent_manager.lock().await;
             let pending = manager.get_pending_intents().into_iter().cloned().collect::<Vec<_>>();
             let awaiting_lock = manager.get_intents_by_status(IntentStatus::AwaitingSuccessfulLock).into_iter().cloned().collect::<Vec<_>>();
-            let btc = self.bitcoin_client.get_balance().await?;
+            drop(manager);
+            
+            let mut bitcoin_client = self.bitcoin_client.lock().await;
+            let btc = bitcoin_client.refresh_balance().await?;
+            drop(bitcoin_client);
+            
             (pending, awaiting_lock, btc)
         };
 
@@ -425,7 +478,7 @@ impl FillerBot {
               intent.intent_id, intent.lane_btc_amount, intent.btc_destination);
 
         // Send BTC to the user's requested address
-        let txid = self.bitcoin_client.send_to_address(
+        let txid = self.bitcoin_client.lock().await.send_to_address(
             &intent.btc_destination,
             intent.lane_btc_amount.to::<u64>(),
             &intent.intent_id,
@@ -458,7 +511,7 @@ impl FillerBot {
 
             loop {
                 // Check current confirmation count
-                match bitcoin_client.get_transaction_confirmations(&txid).await {
+                match bitcoin_client.lock().await.get_transaction_confirmations(&txid).await {
                     Ok(current_confirmations) => {
                         if current_confirmations > confirmations {
                             confirmations = current_confirmations;
