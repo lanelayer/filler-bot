@@ -33,6 +33,11 @@ enum Commands {
         #[arg(long, default_value = "http://127.0.0.1:8545")]
         core_lane_url: String,
 
+        /// Core Lane private key (hex string, with or without 0x prefix)
+        /// Can also be set via CORE_LANE_PRIVATE_KEY environment variable
+        #[arg(long)]
+        core_lane_private_key: String,
+
         /// Bitcoin backend type (electrum or rpc)
         #[arg(long, default_value = "electrum")]
         bitcoin_backend: String,
@@ -72,10 +77,6 @@ enum Commands {
         /// Exit marketplace address
         #[arg(long, default_value = "0x0000000000000000000000000000000000000045")]
         exit_marketplace: String,
-
-        /// Filler bot address (our Core Lane address)
-        #[arg(long)]
-        filler_address: String,
 
         /// Polling interval in seconds
         #[arg(long, default_value = "10")]
@@ -158,6 +159,7 @@ async fn main() -> Result<()> {
     match &cli.command {
         Commands::Start {
             core_lane_url,
+            core_lane_private_key,
             bitcoin_backend,
             electrum_url,
             bitcoin_rpc_url,
@@ -168,7 +170,6 @@ async fn main() -> Result<()> {
             bitcoin_network,
             bitcoin_wallet,
             exit_marketplace,
-            filler_address,
             poll_interval,
         } => {
             // Resolve mnemonic from various sources
@@ -185,11 +186,20 @@ async fn main() -> Result<()> {
             let exit_marketplace_addr = exit_marketplace.parse()
                 .map_err(|e| anyhow::anyhow!("Invalid exit marketplace address: {}", e))?;
 
-            // Parse the filler address
-            let filler_addr = filler_address.parse()
-                .map_err(|e| anyhow::anyhow!("Invalid filler address: {}", e))?;
+            // Normalize the private key (remove 0x prefix if present)
+            let normalized_private_key = core_lane_private_key.trim_start_matches("0x");
 
-            let core_lane_client = Arc::new(CoreLaneClient::new(core_lane_url.clone()));
+            // Create Core Lane client with signer
+            let core_lane_client = Arc::new(CoreLaneClient::new_with_signer(
+                core_lane_url.clone(),
+                normalized_private_key,
+            )?);
+
+            // Get the filler address from the signer
+            let filler_addr = core_lane_client.address()
+                .ok_or_else(|| anyhow::anyhow!("Failed to get address from signer"))?;
+            
+            info!("🔑 Filler bot address (from private key): 0x{:x}", filler_addr);
             
             // Create Bitcoin client with specified backend
             let bitcoin_client = Arc::new(Mutex::new(match bitcoin_backend.as_str() {

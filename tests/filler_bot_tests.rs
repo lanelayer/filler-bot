@@ -1,16 +1,26 @@
 use lanelayer_filler_bot::filler_bot::FillerBot;
 use lanelayer_filler_bot::core_lane_client::CoreLaneClient;
 use lanelayer_filler_bot::bitcoin_client::BitcoinClient;
-use lanelayer_filler_bot::intent_manager::{IntentManager, IntentData, IntentStatus};
+use lanelayer_filler_bot::intent_manager::{IntentManager, IntentData};
 use alloy_primitives::{Address, U256};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+// Test mnemonic - DO NOT use in production
+const TEST_MNEMONIC: &str = "test test test test test test test test test test test junk";
+
 #[tokio::test]
 async fn test_filler_bot_creation() {
     let core_lane_client = Arc::new(CoreLaneClient::new("http://127.0.0.1:8545".to_string()));
-    let bitcoin_client = Arc::new(BitcoinClient::new("http://127.0.0.1:18443".to_string(), "bitcoin".to_string(), "password".to_string(), "test-wallet".to_string()).await.unwrap());
+    let bitcoin_client = Arc::new(Mutex::new(BitcoinClient::new_rpc(
+        "http://127.0.0.1:18443".to_string(),
+        "bitcoin".to_string(),
+        "password".to_string(),
+        TEST_MNEMONIC.to_string(),
+        "regtest".to_string(),
+        "test-wallet".to_string(),
+    ).await.unwrap()));
     let intent_manager = Arc::new(Mutex::new(IntentManager::new()));
 
     let exit_marketplace = Address::from_str("0x0000000000000000000000000000000000000045").unwrap();
@@ -30,7 +40,14 @@ async fn test_filler_bot_creation() {
 #[tokio::test]
 async fn test_bitcoin_address_parsing() {
     let core_lane_client = Arc::new(CoreLaneClient::new("http://127.0.0.1:8545".to_string()));
-    let bitcoin_client = Arc::new(BitcoinClient::new("http://127.0.0.1:18443".to_string(), "bitcoin".to_string(), "password".to_string(), "test-wallet".to_string()).await.unwrap());
+    let bitcoin_client = Arc::new(Mutex::new(BitcoinClient::new_rpc(
+        "http://127.0.0.1:18443".to_string(),
+        "bitcoin".to_string(),
+        "password".to_string(),
+        TEST_MNEMONIC.to_string(),
+        "regtest".to_string(),
+        "test-wallet".to_string(),
+    ).await.unwrap()));
     let intent_manager = Arc::new(Mutex::new(IntentManager::new()));
 
     let exit_marketplace = Address::from_str("0x0000000000000000000000000000000000000045").unwrap();
@@ -65,7 +82,14 @@ async fn test_bitcoin_address_parsing() {
 #[tokio::test]
 async fn test_intent_parsing_logic() {
     let core_lane_client = Arc::new(CoreLaneClient::new("http://127.0.0.1:8545".to_string()));
-    let bitcoin_client = Arc::new(BitcoinClient::new("http://127.0.0.1:18443".to_string(), "bitcoin".to_string(), "password".to_string(), "test-wallet".to_string()).await.unwrap());
+    let bitcoin_client = Arc::new(Mutex::new(BitcoinClient::new_rpc(
+        "http://127.0.0.1:18443".to_string(),
+        "bitcoin".to_string(),
+        "password".to_string(),
+        TEST_MNEMONIC.to_string(),
+        "regtest".to_string(),
+        "test-wallet".to_string(),
+    ).await.unwrap()));
     let intent_manager = Arc::new(Mutex::new(IntentManager::new()));
 
     let exit_marketplace = Address::from_str("0x0000000000000000000000000000000000000045").unwrap();
@@ -120,7 +144,14 @@ async fn test_intent_parsing_logic() {
 #[tokio::test]
 async fn test_fee_calculation() {
     let core_lane_client = Arc::new(CoreLaneClient::new("http://127.0.0.1:8545".to_string()));
-    let bitcoin_client = Arc::new(BitcoinClient::new("http://127.0.0.1:18443".to_string(), "bitcoin".to_string(), "password".to_string(), "test-wallet".to_string()).await.unwrap());
+    let bitcoin_client = Arc::new(Mutex::new(BitcoinClient::new_rpc(
+        "http://127.0.0.1:18443".to_string(),
+        "bitcoin".to_string(),
+        "password".to_string(),
+        TEST_MNEMONIC.to_string(),
+        "regtest".to_string(),
+        "test-wallet".to_string(),
+    ).await.unwrap()));
     let intent_manager = Arc::new(Mutex::new(IntentManager::new()));
 
     let exit_marketplace = Address::from_str("0x0000000000000000000000000000000000000045").unwrap();

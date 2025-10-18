@@ -356,9 +356,9 @@ impl FillerBot {
         // Call solveIntent on the Core Lane contract using IntentSystem
         let intent_id_bytes = B256::from_str(&intent.intent_id)?;
         let block_number_bytes = block_number.to_le_bytes();
-        let solve_data = self.intent_system.solve_intent(intent_id_bytes, &block_number_bytes).await?;
+        let tx_hash = self.intent_system.solve_intent(intent_id_bytes, &block_number_bytes).await?;
 
-        info!("📞 solveIntent call data: {}", solve_data);
+        info!("✅ solveIntent transaction sent: {}", tx_hash);
         info!("✅ Intent {} solved at block {}", intent.intent_id, block_number);
 
         // Remove the intent from our active list
@@ -455,8 +455,8 @@ impl FillerBot {
                     info!("🔓 Intent {} not locked, attempting to lock", intent.intent_id);
 
                     // Try to lock the intent using IntentSystem
-                    let lock_data = self.intent_system.lock_intent_for_solving(intent_id_bytes, b"").await?;
-                    info!("📞 lockIntentForSolving call data: {}", lock_data);
+                    let tx_hash = self.intent_system.lock_intent_for_solving(intent_id_bytes, b"").await?;
+                    info!("🔒 lockIntentForSolving transaction sent: {}", tx_hash);
 
                     // Update status to awaiting successful lock
                     let mut manager = self.intent_manager.lock().await;

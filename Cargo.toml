@@ -26,6 +26,9 @@ alloy-json-abi = "1.3"
 alloy-provider = "1.0.32"
 alloy-network = "1.0.32"
 alloy-transport = "1.0.32"
+alloy-signer = "1.0"
+alloy-signer-local = "1.0"
+alloy-rpc-types = "1.0"
 
 # Async traits
 async-trait = "0.1"
