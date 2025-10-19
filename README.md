@@ -84,12 +84,22 @@ cargo build --release
 
 ```bash
 # Start the filler bot
-./target/release/lanelayer-filler-bot start \
-  --core-lane-url "http://127.0.0.1:8545" \
+./target/debug/lanelayer-filler-bot start \
+  --core-lane-url "http://127.0.0.1:8546" \
+  --core-lane-private-key "your_private_key_here" \
+  --bitcoin-backend "rpc" \
   --bitcoin-rpc-url "http://127.0.0.1:18443" \
   --bitcoin-rpc-password "bitcoin123" \
-  --filler-address "0x1234567890123456789012345678901234567890" \
-  --intent-contract "0x0000000000000000000000000000000000000045"
+  --exit-marketplace "0x0000000000000000000000000000000000000045" \
+  --bitcoin-mnemonic "your_mnemonic_phrase_here" \
+  --bitcoin-wallet "bot_wallet"
+```
+
+### Fund the Bot
+
+```bash
+# Fund the bot's float address with BTC (replace with actual address from bot logs)
+docker exec -it bitcoin-regtest bitcoin-cli -regtest -rpcuser=bitcoin -rpcpassword=bitcoin123 generatetoaddress 101 "your_float_address_here"
 ```
 
 ### Test Connections
@@ -107,13 +117,23 @@ cargo build --release
 
 ## Configuration Options
 
+### Core Lane Options
 - `--core-lane-url`: Core Lane JSON-RPC URL (default: http://127.0.0.1:8545)
+- `--core-lane-private-key`: Private key for signing transactions (required)
+- `--exit-marketplace`: Exit marketplace address (default: 0x0000000000000000000000000000000000000045)
+
+### Bitcoin Options
+- `--bitcoin-backend`: Backend type - `electrum` or `rpc` (default: electrum)
+- `--electrum-url`: Electrum server URL (default: tcp://127.0.0.1:50001)
 - `--bitcoin-rpc-url`: Bitcoin RPC URL (default: http://127.0.0.1:18443)
 - `--bitcoin-rpc-user`: Bitcoin RPC username (default: bitcoin)
-- `--bitcoin-rpc-password`: Bitcoin RPC password (required)
+- `--bitcoin-rpc-password`: Bitcoin RPC password (required for RPC backend)
+- `--bitcoin-mnemonic`: BIP39 mnemonic phrase for Bitcoin wallet (required)
+- `--mnemonic-file`: Path to file containing mnemonic (alternative to --bitcoin-mnemonic)
+- `--bitcoin-network`: Bitcoin network - `bitcoin`, `testnet`, `signet`, `regtest` (default: regtest)
 - `--bitcoin-wallet`: Bitcoin wallet name (default: filler-bot)
-- `--exit-marketplace`: Exit marketplace address (default: 0x0000000000000000000000000000000000000045)
-- `--filler-address`: Your Core Lane address (required)
+
+### Other Options
 - `--poll-interval`: Polling interval in seconds (default: 10)
 
 ## Intent Management
@@ -140,22 +160,23 @@ The bot provides detailed logging for monitoring:
 
 ### ✅ Completed
 - Basic repository setup with Rust
-- Bitcoin RPC integration
-- Core Lane JSON-RPC client
-- Intent management system
-- Basic filler bot logic
+- Bitcoin wallet integration with BDK (Electrum + RPC backends)
+- Core Lane JSON-RPC client with transaction signing
+- Intent management system with state tracking
+- Intent ABI parsing with CBOR support
+- Transaction signing and submission for lock/solve operations
+- Bitcoin transaction monitoring with confirmation tracking
+- Filler bot logic with race condition handling
 
 ### 🚧 In Progress
-- Intent ABI parsing (currently mocked)
-- Actual contract interaction transactions
-- Error handling and recovery
+- Advanced monitoring and metrics
+- Production testing and hardening
 
 ### TODO
-- Real Intent ABI implementation
-- Transaction signing and submission
-- Advanced monitoring and metrics
 - Configuration file support
 - Docker containerization
+- Fee optimization strategies
+- Multi-intent batching
 
 ## Contributing
 

@@ -109,14 +109,30 @@ impl IntentSystem for CoreLaneIntentSystem {
 
     async fn lock_intent_for_solving(&self, intent_id: B256, data: &[u8]) -> Result<String> {
         let call_data = self.intent_contract.encode_lock_intent_call(intent_id, data);
-        let result = self.client.call_contract(self.contract_address, &call_data).await?;
-        Ok(result)
+        let call_data_bytes = hex::decode(call_data.trim_start_matches("0x"))?;
+        
+        // Send the transaction (not just a call)
+        let tx_hash = self.client.send_transaction(
+            self.contract_address,
+            call_data_bytes,
+            U256::ZERO,
+        ).await?;
+        
+        Ok(tx_hash)
     }
 
     async fn solve_intent(&self, intent_id: B256, data: &[u8]) -> Result<String> {
         let call_data = self.intent_contract.encode_solve_intent_call(intent_id, data);
-        let result = self.client.call_contract(self.contract_address, &call_data).await?;
-        Ok(result)
+        let call_data_bytes = hex::decode(call_data.trim_start_matches("0x"))?;
+        
+        // Send the transaction (not just a call)
+        let tx_hash = self.client.send_transaction(
+            self.contract_address,
+            call_data_bytes,
+            U256::ZERO,
+        ).await?;
+        
+        Ok(tx_hash)
     }
 
     async fn cancel_intent_lock(&self, intent_id: B256, data: &[u8]) -> Result<String> {
