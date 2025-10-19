@@ -46,20 +46,28 @@ pub struct Transaction {
     pub value: String,
     pub input: String,
     pub gas: String,
+    #[serde(rename = "gasPrice")]
     pub gas_price: String,
     pub nonce: String,
+    #[serde(rename = "blockNumber")]
     pub block_number: Option<String>,
+    #[serde(rename = "blockHash")]
     pub block_hash: Option<String>,
+    #[serde(rename = "transactionIndex")]
     pub transaction_index: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct TransactionReceipt {
+    #[serde(rename = "transactionHash")]
     pub transaction_hash: String,
+    #[serde(rename = "blockNumber")]
     pub block_number: String,
+    #[serde(rename = "transactionIndex")]
     pub transaction_index: String,
     pub from: String,
     pub to: Option<String>,
+    #[serde(rename = "gasUsed")]
     pub gas_used: String,
     pub status: String,
     pub logs: Vec<Value>,

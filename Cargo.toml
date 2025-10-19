@@ -15,7 +15,7 @@ reqwest = { version = "0.11", features = ["json"] }
 
 # Bitcoin RPC client
 bitcoincore-rpc = "0.19"
-bitcoin = "0.31"
+bitcoin = { version = "0.32", features = ["rand", "serde"] }
 
 # Ethereum/Alloy primitives for Core Lane interaction
 alloy-primitives = "1.3"

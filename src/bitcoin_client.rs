@@ -30,6 +30,11 @@ pub struct BitcoinClient {
 }
 
 impl BitcoinClient {
+    /// Get the network this client is configured for
+    pub fn network(&self) -> Network {
+        self.network
+    }
+
     /// Create a new BDK-based Bitcoin client with Electrum backend
     pub async fn new_electrum(
         electrum_url: String,
@@ -317,9 +322,14 @@ impl BitcoinClient {
 
         let txid = tx.compute_txid();
 
-        // Verify transaction has exactly 2 outputs as expected by Core Lane
-        if tx.output.len() != 2 {
-            return Err(anyhow::anyhow!("Transaction must have exactly 2 outputs, got {}", tx.output.len()));
+        // Verify transaction has at least 2 outputs (payment + OP_RETURN)
+        // There may be a 3rd output for change if needed
+        if tx.output.len() < 2 {
+            return Err(anyhow::anyhow!("Transaction must have at least 2 outputs (payment + OP_RETURN), got {}", tx.output.len()));
+        }
+        
+        if tx.output.len() > 2 {
+            info!("💰 Transaction has {} outputs (includes {} sat change output)", tx.output.len(), tx.output[2].value.to_sat());
         }
 
         // Broadcast transaction via configured backend
@@ -386,15 +396,16 @@ impl BitcoinClient {
                 let rpc_txid = RpcTxid::from_str(&txid.to_string())
                     .map_err(|e| anyhow::anyhow!("Failed to convert txid: {}", e))?;
 
-                let tx_info = client.get_transaction(&rpc_txid, None)
+                // Use getrawtransaction instead of gettransaction (doesn't require wallet)
+                let tx_info = client.get_raw_transaction_info(&rpc_txid, None)
                     .map_err(|e| anyhow::anyhow!("Failed to get transaction: {}", e))?;
 
                 // Convert to JSON format
                 Ok(json!({
                     "txid": txid.to_string(),
-                    "confirmations": tx_info.info.confirmations,
-                    "time": tx_info.info.time,
-                    "blocktime": tx_info.info.blocktime,
+                    "confirmations": tx_info.confirmations.unwrap_or(0),
+                    "time": tx_info.time,
+                    "blocktime": tx_info.blocktime,
                 }))
             }
         }
@@ -527,8 +538,9 @@ impl BitcoinClient {
                 let rpc_txid = RpcTxid::from_str(&txid.to_string())
                     .map_err(|e| anyhow::anyhow!("Failed to convert txid: {}", e))?;
 
-                match client.get_transaction(&rpc_txid, None) {
-                    Ok(tx_info) => Ok(tx_info.info.confirmations.max(0) as u32),
+                // Use getrawtransaction instead of gettransaction (doesn't require wallet)
+                match client.get_raw_transaction_info(&rpc_txid, None) {
+                    Ok(tx_info) => Ok(tx_info.confirmations.unwrap_or(0) as u32),
                     Err(_) => Ok(0), // Not found or unconfirmed
                 }
             }

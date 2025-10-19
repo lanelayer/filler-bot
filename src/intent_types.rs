@@ -2,7 +2,6 @@ use anyhow::Result;
 use alloy_primitives::U256;
 use ciborium::{from_reader, into_writer};
 use serde::{Deserialize, Serialize};
-use std::str::FromStr;
 use std::io::Cursor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,11 +76,27 @@ impl AnchorBitcoinFill {
         Ok(buffer)
     }
 
-    pub fn parse_bitcoin_address(&self) -> Result<String> {
-        let address_str = bs58::encode(&self.bitcoin_address).into_string();
+    pub fn parse_bitcoin_address(&self, network: bitcoin::Network) -> Result<String> {
+        use tracing::debug;
+        
+        // The bitcoin_address is stored as UTF-8 bytes of the address string
+        debug!("Parsing bitcoin_address from {} bytes", self.bitcoin_address.len());
+        let address_str = String::from_utf8(self.bitcoin_address.clone())
+            .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in bitcoin_address: {}", e))?;
+        debug!("Address string: {}", address_str);
 
-        use bitcoin::Address;
-        let _address = Address::from_str(&address_str)?;
+        // Validate it's a valid Bitcoin address for the configured network
+        // In bitcoin 0.32, Address parsing returns Address<NetworkUnchecked>
+        use bitcoin::address::{Address, NetworkUnchecked};
+        
+        debug!("Parsing address for network: {:?}", network);
+        let unchecked_addr: Address<NetworkUnchecked> = address_str.parse()
+            .map_err(|e| anyhow::anyhow!("Failed to parse Bitcoin address '{}': {}", address_str, e))?;
+        debug!("Address parsed successfully, validating network...");
+        
+        unchecked_addr.require_network(network)
+            .map_err(|e| anyhow::anyhow!("Address network validation failed: {}", e))?;
+        debug!("✅ Address validated for network {:?}", network);
 
         Ok(address_str)
     }
@@ -92,10 +107,10 @@ impl AnchorBitcoinFill {
         max_fee: U256,
         expire_by: u64,
     ) -> Result<Self> {
-        let address_bytes = bs58::decode(bitcoin_address).into_vec()?;
-
+        // Store the address as UTF-8 bytes (not base58-decoded)
+        // This matches Core Lane's implementation
         Ok(AnchorBitcoinFill {
-            bitcoin_address: address_bytes,
+            bitcoin_address: bitcoin_address.as_bytes().to_vec(),
             amount,
             max_fee,
             expire_by,
@@ -176,7 +191,7 @@ mod tests {
             1234567890,
         ).unwrap();
 
-        let parsed_address = fill_data.parse_bitcoin_address().unwrap();
+        let parsed_address = fill_data.parse_bitcoin_address(bitcoin::Network::Testnet).unwrap();
         assert_eq!(parsed_address, test_address);
     }
 
@@ -201,7 +216,7 @@ mod tests {
         assert_eq!(fill_data.max_fee, max_fee);
         assert_eq!(fill_data.expire_by, expire_by);
 
-        let parsed_address = fill_data.parse_bitcoin_address().unwrap();
+        let parsed_address = fill_data.parse_bitcoin_address(bitcoin::Network::Testnet).unwrap();
         assert_eq!(parsed_address, test_address);
     }
 }
