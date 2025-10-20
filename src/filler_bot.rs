@@ -231,10 +231,16 @@ impl FillerBot {
                     let cbor_intent = CborIntentData::from_cbor(&intent_data)?;
                     debug!("✅ CBOR parsed successfully, type: {:?}", cbor_intent.intent_type);
 
-                    // Parse Bitcoin address from CBOR intent data
+                    // Parse Bitcoin address and amount from CBOR intent data
                     debug!("🔍 Parsing Bitcoin address from intent...");
                     let btc_destination = self.parse_bitcoin_address_from_cbor_intent(&cbor_intent).await?;
                     debug!("✅ Bitcoin address parsed: {}", btc_destination);
+                    
+                    // Parse the actual amount from the CBOR data
+                    let fill_data = cbor_intent.parse_anchor_bitcoin_fill()?;
+                    let actual_btc_amount = fill_data.amount; // This is the amount to send in BTC
+                    let max_fee = fill_data.max_fee;
+                    debug!("💰 Intent amount: {} sats, max_fee: {} sats", actual_btc_amount, max_fee);
 
                     // Calculate intent ID using the same method as core-lane
                     // Core Lane uses the TRANSACTION nonce, not the intent function parameter nonce
@@ -245,22 +251,20 @@ impl FillerBot {
                     let intent_id = crate::intent_contract::calculate_intent_id(from, tx_nonce, intent_data.clone().into());
                     debug!("Calculated intent_id: {:?}", intent_id);
 
-                    // Convert value from wei to sats (1 sat = 1 gwei = 10^9 wei)
+                    // Convert locked value from wei to sats (1 sat = 1 gwei = 10^9 wei)
                     let value_wei = U256::from_str_radix(&tx.value.trim_start_matches("0x"), 16)?;
                     let gwei = U256::from(1_000_000_000u64);
-                    let value_sats = value_wei / gwei;
+                    let locked_value_sats = value_wei / gwei;
                     
-                    // Calculate fee (1% of the amount in sats)
-                    let fee = value_sats / U256::from(100);
-
-                    debug!("💰 Intent value: {} wei = {} sats", value_wei, value_sats);
+                    debug!("💰 Intent locked value: {} wei = {} sats (amount={}, fee={})", 
+                           value_wei, locked_value_sats, actual_btc_amount, max_fee);
 
                     return Ok(Some(IntentData {
                         intent_id: format!("0x{:x}", intent_id),
                         user_address: from,
                         btc_destination,
-                        lane_btc_amount: value_sats,
-                        fee,
+                        lane_btc_amount: actual_btc_amount, // Store the actual BTC amount to send, not the total locked
+                        fee: max_fee,
                     }));
                 }
                 _ => {
@@ -381,40 +385,69 @@ impl FillerBot {
         let bitcoin_txid = intent.bitcoin_txid.as_ref()
             .ok_or_else(|| anyhow::anyhow!("No Bitcoin txid found for intent"))?;
 
-        // Get the current block number for the solve call
-        let block_number = self.core_lane_client.get_block_number().await?;
+        // Get the Bitcoin transaction info to find which block it's in
+        let bitcoin_client = self.bitcoin_client.lock().await;
+        let tx_info = bitcoin_client.get_transaction(bitcoin_txid).await?;
+        drop(bitcoin_client);
+        
+        // Extract the block number from the transaction info
+        // Core Lane uses Bitcoin block numbers, not Core Lane block numbers
+        let bitcoin_block_number = tx_info.get("blockheight")
+            .or_else(|| tx_info.get("block_height"))
+            .or_else(|| tx_info.get("blockNumber"))
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| anyhow::anyhow!("No block height in transaction info: {:?}", tx_info))?;
+
+        info!("📍 Bitcoin transaction {} is in Bitcoin block {}", bitcoin_txid, bitcoin_block_number);
 
         // Prepare solve data: block_height (8 bytes) + txid (32 bytes)
         let mut solve_data = Vec::new();
-        solve_data.extend_from_slice(&block_number.to_le_bytes());
+        solve_data.extend_from_slice(&bitcoin_block_number.to_le_bytes());
         
-        // Parse Bitcoin txid and convert to 32 bytes
-        let txid_bytes = hex::decode(bitcoin_txid.trim_start_matches("0x"))
-            .or_else(|_| {
-                // If not hex, try as Bitcoin txid string
-                use bitcoin::hashes::Hash;
-                bitcoin::Txid::from_str(bitcoin_txid)
-                    .map(|txid| txid.to_byte_array().to_vec())
-            })?;
+        // Parse Bitcoin txid and convert to 32 bytes (internal byte order)
+        // Bitcoin txids are displayed in reversed byte order, but stored internally in forward order
+        let txid_parsed = bitcoin::Txid::from_str(bitcoin_txid)
+            .map_err(|e| anyhow::anyhow!("Failed to parse Bitcoin txid '{}': {}", bitcoin_txid, e))?;
         
-        if txid_bytes.len() != 32 {
-            return Err(anyhow::anyhow!("Bitcoin txid must be 32 bytes, got {}", txid_bytes.len()));
-        }
+        // Get the internal byte representation (not display order)
+        use bitcoin::hashes::Hash;
+        let txid_bytes = txid_parsed.to_byte_array();
+        
+        debug!("Bitcoin txid (display): {}", bitcoin_txid);
+        debug!("Bitcoin txid (internal bytes): {}", hex::encode(txid_bytes));
+        
         solve_data.extend_from_slice(&txid_bytes);
 
-        debug!("Solve data: block_number={}, txid={}, total_bytes={}", block_number, bitcoin_txid, solve_data.len());
+        debug!("Solve data: block_number={}, txid={}, total_bytes={}", bitcoin_block_number, bitcoin_txid, solve_data.len());
 
         // Call solveIntent on the Core Lane contract using IntentSystem
         let intent_id_bytes = B256::from_str(&intent.intent_id)?;
         let tx_hash = self.intent_system.solve_intent(intent_id_bytes, &solve_data).await?;
 
         info!("✅ solveIntent transaction sent: {}", tx_hash);
-        info!("✅ Intent {} solved at block {} with Bitcoin tx {}", intent.intent_id, block_number, bitcoin_txid);
-
-        // Remove the intent from our active list
-        let mut manager = self.intent_manager.lock().await;
-        manager.update_intent_status(&intent.intent_id, IntentStatus::Solved)?;
-        manager.remove_intent(&intent.intent_id);
+        
+        // Wait a bit for the transaction to be mined
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        
+        // Verify the intent is actually solved on Core Lane
+        match self.intent_system.is_intent_solved(intent_id_bytes).await {
+            Ok(true) => {
+                info!("✅ Intent {} solved successfully at Bitcoin block {} with Bitcoin tx {}", 
+                      intent.intent_id, bitcoin_block_number, bitcoin_txid);
+                
+                // Remove the intent from our active list
+                let mut manager = self.intent_manager.lock().await;
+                manager.update_intent_status(&intent.intent_id, IntentStatus::Solved)?;
+                manager.remove_intent(&intent.intent_id);
+            }
+            Ok(false) => {
+                warn!("⚠️  Solve transaction sent but intent {} not marked as solved on Core Lane yet, will retry", intent.intent_id);
+                // Keep the intent in Fulfilled status so we retry solving next cycle
+            }
+            Err(e) => {
+                error!("Failed to check if intent {} is solved: {}", intent.intent_id, e);
+            }
+        }
 
         Ok(())
     }
@@ -524,10 +557,11 @@ impl FillerBot {
     }
 
     async fn fulfill_intent(&self, intent: &crate::intent_manager::UserIntent) -> Result<()> {
-        info!("💰 Fulfilling intent: {} ({} sats -> {})",
-              intent.intent_id, intent.lane_btc_amount, intent.btc_destination);
+        info!("💰 Fulfilling intent: {} ({} sats + {} fee -> {})",
+              intent.intent_id, intent.lane_btc_amount, intent.fee, intent.btc_destination);
 
         // Send BTC to the user's requested address
+        // lane_btc_amount now contains the actual BTC amount from CBOR (not including fee)
         let txid = self.bitcoin_client.lock().await.send_to_address(
             &intent.btc_destination,
             intent.lane_btc_amount.to::<u64>(),

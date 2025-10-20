@@ -400,10 +400,21 @@ impl BitcoinClient {
                 let tx_info = client.get_raw_transaction_info(&rpc_txid, None)
                     .map_err(|e| anyhow::anyhow!("Failed to get transaction: {}", e))?;
 
+                // Get block height if the transaction is in a block
+                let block_height = if let Some(block_hash) = &tx_info.blockhash {
+                    match client.get_block_header_info(block_hash) {
+                        Ok(header) => Some(header.height as u64),
+                        Err(_) => None,
+                    }
+                } else {
+                    None
+                };
+
                 // Convert to JSON format
                 Ok(json!({
                     "txid": txid.to_string(),
                     "confirmations": tx_info.confirmations.unwrap_or(0),
+                    "blockheight": block_height,
                     "time": tx_info.time,
                     "blocktime": tx_info.blocktime,
                 }))
