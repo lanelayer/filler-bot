@@ -1,0 +1,44 @@
+version: '3.8'
+# Include the core-lane Docker Compose file
+include:
+  - /root/core-lane/docker/docker-compose.yml
+
+services:
+  filler-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: filler-bot
+    ports:
+      - "8080:8080"
+    environment:
+      # Core Lane configuration - using actual service names from included compose
+      CORE_LANE_URL: "http://core-lane:8545"
+      CORE_LANE_PRIVATE_KEY: "${CORE_LANE_PRIVATE_KEY}"
+      
+      # Bitcoin configuration
+      BITCOIN_BACKEND: "electrum"
+      ELECTRUM_URL: "ssl://electrum.blockstream.info:50002"
+      BITCOIN_RPC_URL: "https://bitcoin-rpc.publicnode.com"
+      BITCOIN_RPC_PASSWORD: "${BITCOIN_RPC_PASSWORD}"
+      BITCOIN_NETWORK: "mainnet"
+      BITCOIN_MNEMONIC: "${BITCOIN_MNEMONIC}"
+      BITCOIN_WALLET: "filler-bot"
+      
+      # Filler bot configuration
+      EXIT_MARKETPLACE: "0x0000000000000000000000000000000000000045"
+      POLL_INTERVAL: "10"
+      
+      # Logging
+      RUST_LOG: "info"
+    depends_on:
+      core-lane:
+        condition: service_started
+    restart: unless-stopped
+    volumes:
+      - filler-bot-data:/app/data
+    networks:
+      - lane-network
+
+volumes:
+  filler-bot-data:
