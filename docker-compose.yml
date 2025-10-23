@@ -1,7 +1,7 @@
 version: '3.8'
 # Include the core-lane Docker Compose file
 include:
-  - /root/core-lane/docker/docker-compose.yml
+  - ../core-lane/docker/docker-compose.yml
 
 services:
   filler-bot:

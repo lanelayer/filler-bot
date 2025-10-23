@@ -49,6 +49,9 @@ if [ -n "$BITCOIN_MNEMONIC" ]; then
     ARGS+=("--bitcoin-mnemonic" "$BITCOIN_MNEMONIC")
 elif [ -n "$MNEMONIC_FILE" ]; then
     ARGS+=("--mnemonic-file" "$MNEMONIC_FILE")
+else
+    echo "Error: Either BITCOIN_MNEMONIC or MNEMONIC_FILE must be set" >&2
+    exit 1
 fi
 
 # Add other Bitcoin arguments
