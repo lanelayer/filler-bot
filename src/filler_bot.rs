@@ -169,13 +169,6 @@ impl FillerBot {
 
         info!("📦 Block {} has {} transactions", block_number, block.transactions.len());
 
-        // Sync and print balance for every block
-        let mut bitcoin_client = self.bitcoin_client.lock().await;
-        let balance = bitcoin_client.refresh_balance().await?;
-        info!("💰 Bot Balance at Block {} (synced): {} sats ({:.8} BTC)", 
-              block_number, balance, balance as f64 / 100_000_000.0);
-        drop(bitcoin_client);
-
         // Process each transaction in the block
         for tx_hash in &block.transactions {
             if let Err(e) = self.process_transaction(tx_hash).await {

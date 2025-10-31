@@ -1,7 +1,7 @@
 services:
   filler-bot:
     build:
-      context: ./filler-bot
+      context: /root/filler-bot
       dockerfile: Dockerfile
     container_name: filler-bot
     ports:
@@ -27,7 +27,7 @@ services:
       POLL_INTERVAL: "10"
       
       # Logging
-      RUST_LOG: "info"
+      RUST_LOG: "debug"
     depends_on:
       core-lane:
         condition: service_started
