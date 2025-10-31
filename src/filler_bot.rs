@@ -136,9 +136,6 @@ impl FillerBot {
         // Process any fulfilled intents
         self.process_fulfilled_intents().await?;
 
-        // Check balance and warn if low
-        self.check_balance().await?;
-
         Ok(())
     }
 
@@ -454,17 +451,13 @@ impl FillerBot {
 
     /// Process pending intents and attempt to fulfill them
     pub async fn process_pending_intents(&self) -> Result<()> {
-        let (pending_intents, awaiting_lock_intents, available_btc) = {
+        let (pending_intents, awaiting_lock_intents) = {
             let manager = self.intent_manager.lock().await;
             let pending = manager.get_pending_intents().into_iter().cloned().collect::<Vec<_>>();
             let awaiting_lock = manager.get_intents_by_status(IntentStatus::AwaitingSuccessfulLock).into_iter().cloned().collect::<Vec<_>>();
             drop(manager);
             
-            let mut bitcoin_client = self.bitcoin_client.lock().await;
-            let btc = bitcoin_client.refresh_balance().await?;
-            drop(bitcoin_client);
-            
-            (pending, awaiting_lock, btc)
+            (pending, awaiting_lock)
         };
 
         // Process intents awaiting successful lock confirmation
@@ -504,6 +497,18 @@ impl FillerBot {
                 }
             }
         }
+
+        // Only refresh balance if there are pending intents to process
+        if pending_intents.len() == 0 {
+            return Ok(());
+        }
+
+        let available_btc = {
+            let mut bitcoin_client = self.bitcoin_client.lock().await;
+            let btc = bitcoin_client.refresh_balance().await?;
+            drop(bitcoin_client);
+            btc
+        };
 
         // Process new pending intents
         for intent in pending_intents {
