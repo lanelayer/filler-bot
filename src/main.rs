@@ -2,16 +2,11 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{info, error};
+use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use lanelayer_filler_bot::{
-    CoreLaneClient,
-    BitcoinClient,
-    IntentManager,
-    FillerBot,
-    SimulatorTester,
-};
+use alloy_signer_local::PrivateKeySigner;
+use lanelayer_filler_bot::{BitcoinClient, FillerBot, IntentManager, SimulatorTester};
 
 #[derive(Parser)]
 #[command(name = "lanelayer-filler-bot")]
@@ -173,34 +168,21 @@ async fn main() -> Result<()> {
             poll_interval,
         } => {
             // Resolve mnemonic from various sources
-            let mnemonic_str = resolve_mnemonic(
-                bitcoin_mnemonic.as_deref(),
-                mnemonic_file.as_deref(),
-            )?;
+            let mnemonic_str =
+                resolve_mnemonic(bitcoin_mnemonic.as_deref(), mnemonic_file.as_deref())?;
 
             if !cli.plain {
                 info!("🚀 Starting Filler Bot with BDK...");
             }
 
             // Parse the exit marketplace address
-            let exit_marketplace_addr = exit_marketplace.parse()
+            let exit_marketplace_addr = exit_marketplace
+                .parse()
                 .map_err(|e| anyhow::anyhow!("Invalid exit marketplace address: {}", e))?;
 
             // Normalize the private key (remove 0x prefix if present)
             let normalized_private_key = core_lane_private_key.trim_start_matches("0x");
 
-            // Create Core Lane client with signer
-            let core_lane_client = Arc::new(CoreLaneClient::new_with_signer(
-                core_lane_url.clone(),
-                normalized_private_key,
-            )?);
-
-            // Get the filler address from the signer
-            let filler_addr = core_lane_client.address()
-                .ok_or_else(|| anyhow::anyhow!("Failed to get address from signer"))?;
-            
-            info!("🔑 Filler bot address (from private key): 0x{:x}", filler_addr);
-            
             // Create Bitcoin client with specified backend
             let bitcoin_client = Arc::new(Mutex::new(match bitcoin_backend.as_str() {
                 "electrum" => {
@@ -209,12 +191,13 @@ async fn main() -> Result<()> {
                         mnemonic_str,
                         bitcoin_network.clone(),
                         bitcoin_wallet.clone(),
-                    ).await?
+                    )
+                    .await?
                 }
                 "rpc" => {
                     let rpc_password = bitcoin_rpc_password.as_deref()
                         .ok_or_else(|| anyhow::anyhow!("Bitcoin RPC password required when using RPC backend. Set BITCOIN_RPC_PASSWORD environment variable or use --bitcoin-rpc-password"))?;
-                    
+
                     BitcoinClient::new_rpc(
                         bitcoin_rpc_url.clone(),
                         bitcoin_rpc_user.clone(),
@@ -222,32 +205,46 @@ async fn main() -> Result<()> {
                         mnemonic_str,
                         bitcoin_network.clone(),
                         bitcoin_wallet.clone(),
-                    ).await?
+                    )
+                    .await?
                 }
-                _ => return Err(anyhow::anyhow!("Invalid bitcoin backend: {}. Must be 'electrum' or 'rpc'", bitcoin_backend)),
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "Invalid bitcoin backend: {}. Must be 'electrum' or 'rpc'",
+                        bitcoin_backend
+                    ))
+                }
             }));
 
             // Create intent manager
             let intent_manager = Arc::new(Mutex::new(IntentManager::new()));
 
-            // Create and start the filler bot
-            let bot = FillerBot::new(
-                core_lane_client,
+            // Create and start the filler bot with signer
+            let bot = FillerBot::new_with_signer(
+                core_lane_url.clone(),
+                normalized_private_key,
                 bitcoin_client,
                 intent_manager,
                 exit_marketplace_addr,
-                filler_addr,
                 *poll_interval,
-            );
+            )?;
 
             bot.start().await?;
         }
 
         Commands::TestCoreLane { core_lane_url } => {
-            let client = CoreLaneClient::new(core_lane_url.clone());
-            match client.test_connection().await {
+            use alloy_network::Ethereum;
+            use alloy_provider::{Provider, ProviderBuilder};
+            let url: url::Url = core_lane_url
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid URL: {}", e))?;
+            let provider = ProviderBuilder::new().connect_http(url);
+            match provider.get_block_number().await {
                 Ok(block_number) => {
-                    info!("✅ Core Lane connection successful! Latest block: {}", block_number);
+                    info!(
+                        "✅ Core Lane connection successful! Latest block: {}",
+                        block_number
+                    );
                 }
                 Err(e) => {
                     error!("❌ Core Lane connection failed: {}", e);
@@ -268,12 +265,13 @@ async fn main() -> Result<()> {
             bitcoin_wallet,
         } => {
             // Resolve mnemonic
-            let mnemonic_str = resolve_mnemonic(
-                bitcoin_mnemonic.as_deref(),
-                mnemonic_file.as_deref(),
-            )?;
+            let mnemonic_str =
+                resolve_mnemonic(bitcoin_mnemonic.as_deref(), mnemonic_file.as_deref())?;
 
-            info!("🔧 Testing Bitcoin connection via {} (BDK)...", bitcoin_backend);
+            info!(
+                "🔧 Testing Bitcoin connection via {} (BDK)...",
+                bitcoin_backend
+            );
 
             let client = match bitcoin_backend.as_str() {
                 "electrum" => {
@@ -282,12 +280,13 @@ async fn main() -> Result<()> {
                         mnemonic_str,
                         bitcoin_network.clone(),
                         bitcoin_wallet.clone(),
-                    ).await?
+                    )
+                    .await?
                 }
                 "rpc" => {
                     let rpc_password = bitcoin_rpc_password.as_deref()
                         .ok_or_else(|| anyhow::anyhow!("Bitcoin RPC password required when using RPC backend. Set BITCOIN_RPC_PASSWORD environment variable or use --bitcoin-rpc-password"))?;
-                    
+
                     BitcoinClient::new_rpc(
                         bitcoin_rpc_url.clone(),
                         bitcoin_rpc_user.clone(),
@@ -295,15 +294,24 @@ async fn main() -> Result<()> {
                         mnemonic_str,
                         bitcoin_network.clone(),
                         bitcoin_wallet.clone(),
-                    ).await?
+                    )
+                    .await?
                 }
-                _ => return Err(anyhow::anyhow!("Invalid bitcoin backend: {}. Must be 'electrum' or 'rpc'", bitcoin_backend)),
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "Invalid bitcoin backend: {}. Must be 'electrum' or 'rpc'",
+                        bitcoin_backend
+                    ))
+                }
             };
 
             match client.test_connection().await {
                 Ok(block_count) => {
-                    info!("✅ Bitcoin connection successful! Block count: {}", block_count);
-                    
+                    info!(
+                        "✅ Bitcoin connection successful! Block count: {}",
+                        block_count
+                    );
+
                     // Show wallet info
                     let mut client_mut = client;
                     let balance = client_mut.refresh_balance().await?;
@@ -321,11 +329,12 @@ async fn main() -> Result<()> {
             simulator_address,
         } => {
             // Parse the simulator address
-            let simulator_addr = simulator_address.parse()
+            let simulator_addr = simulator_address
+                .parse()
                 .map_err(|e| anyhow::anyhow!("Invalid simulator address: {}", e))?;
 
             // Create simulator tester
-            let tester = SimulatorTester::new(core_lane_url.clone(), simulator_addr);
+            let tester = SimulatorTester::new(core_lane_url.clone(), simulator_addr)?;
 
             // Run all tests
             match tester.run_all_tests().await {

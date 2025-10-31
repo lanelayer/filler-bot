@@ -1,8 +1,8 @@
-use alloy_primitives::{Address, U256, B256, Bytes, keccak256};
+use crate::intent_manager::IntentData;
+use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use alloy_sol_types::{sol, SolCall};
 use anyhow::Result;
 use std::str::FromStr;
-use crate::intent_manager::IntentData;
 
 sol! {
     #[allow(missing_docs)]
@@ -89,7 +89,12 @@ pub trait IntentSystemInterface {
     async fn intent(&self, intent_data: &[u8], nonce: u64) -> Result<B256>;
 
     /// Make an intent based on a blob and attach extraData to execution
-    async fn intent_from_blob(&self, blob_hash: B256, nonce: u64, extra_data: &[u8]) -> Result<B256>;
+    async fn intent_from_blob(
+        &self,
+        blob_hash: B256,
+        nonce: u64,
+        extra_data: &[u8],
+    ) -> Result<B256>;
 
     // Intent management functions
     /// Cancel an intent if intent allows us
@@ -247,11 +252,24 @@ pub fn decode_intent_calldata(calldata: &[u8]) -> Option<IntentCall> {
 
 /// Calculate intent ID using the same method as core-lane
 pub fn calculate_intent_id(sender: Address, nonce: u64, input: Bytes) -> B256 {
+    use tracing::debug;
+
     let mut preimage = Vec::new();
     preimage.extend_from_slice(sender.as_slice());
     preimage.extend_from_slice(&nonce.to_be_bytes());
     preimage.extend_from_slice(&input);
-    keccak256(preimage)
+
+    debug!(
+        "Calculating intent ID: sender={:?}, nonce={}, input_len={}",
+        sender,
+        nonce,
+        input.len()
+    );
+
+    let intent_id = keccak256(preimage);
+    debug!("Calculated intent_id: {:?}", intent_id);
+
+    intent_id
 }
 
 /// Get the calldata bytes from a transaction envelope
@@ -271,6 +289,47 @@ pub fn get_transaction_nonce(tx: &alloy_consensus::TxEnvelope) -> u64 {
         alloy_consensus::TxEnvelope::Eip1559(signed) => signed.tx().nonce,
         alloy_consensus::TxEnvelope::Eip2930(signed) => signed.tx().nonce,
         _ => 0,
+    }
+}
+
+pub fn get_transaction_from_from_recovered(
+    inner: &alloy_consensus::transaction::Recovered<alloy_consensus::TxEnvelope>,
+) -> Address {
+    // Recovered transactions have the sender address computed from the signature.
+    // The Recovered type exposes the sender address via the `signer()` method
+    // which returns the address that was recovered from the transaction signature.
+    inner.signer()
+}
+
+pub fn get_transaction_value(tx: &alloy_consensus::TxEnvelope) -> U256 {
+    match tx {
+        alloy_consensus::TxEnvelope::Legacy(signed) => signed.tx().value,
+        alloy_consensus::TxEnvelope::Eip1559(signed) => signed.tx().value,
+        alloy_consensus::TxEnvelope::Eip2930(signed) => signed.tx().value,
+        alloy_consensus::TxEnvelope::Eip4844(signed) => signed.tx().tx().value,
+        _ => U256::ZERO,
+    }
+}
+
+pub fn get_transaction_to(tx: &alloy_consensus::TxEnvelope) -> Option<Address> {
+    match tx {
+        alloy_consensus::TxEnvelope::Legacy(signed) => match signed.tx().to {
+            alloy_primitives::TxKind::Call(addr) => Some(addr),
+            _ => None,
+        },
+        alloy_consensus::TxEnvelope::Eip1559(signed) => match signed.tx().to {
+            alloy_primitives::TxKind::Call(addr) => Some(addr),
+            _ => None,
+        },
+        alloy_consensus::TxEnvelope::Eip2930(signed) => match signed.tx().to {
+            alloy_primitives::TxKind::Call(addr) => Some(addr),
+            _ => None,
+        },
+        alloy_consensus::TxEnvelope::Eip4844(signed) => {
+            // EIP-4844 transactions have `to` as a direct Address field, not TxKind
+            Some(signed.tx().tx().to)
+        }
+        _ => None,
     }
 }
 
@@ -307,7 +366,11 @@ impl IntentContract {
                     let btc_destination = self.parse_bitcoin_address_from_input(&intent_data)?;
 
                     // Calculate intent ID using the same method as core-lane
-                    let intent_id = calculate_intent_id(from, nonce.to::<u64>(), Bytes::from(intent_data.clone()));
+                    let intent_id = calculate_intent_id(
+                        from,
+                        nonce.to::<u64>(),
+                        Bytes::from(intent_data.clone()),
+                    );
 
                     // Calculate fee (1% of the amount)
                     let fee = value / U256::from(100);
@@ -355,15 +418,23 @@ impl IntentContract {
             if let Some(start) = input.find(prefix) {
                 // Find the end of the address (stop at non-alphanumeric characters)
                 let addr_start = start;
-                let addr_end = input[addr_start..].find(|c: char| !c.is_alphanumeric()).unwrap_or(input.len() - addr_start);
+                let addr_end = input[addr_start..]
+                    .find(|c: char| !c.is_alphanumeric())
+                    .unwrap_or(input.len() - addr_start);
                 let addr_str = &input[addr_start..addr_start + addr_end];
 
                 // Validate bech32 address length and format
                 if addr_str.len() >= 26 && addr_str.len() <= 62 {
                     // Try to parse as a valid Bitcoin address
-                    if let Ok(addr) = addr_str.parse::<Address<bitcoin::address::NetworkUnchecked>>() {
+                    if let Ok(addr) =
+                        addr_str.parse::<Address<bitcoin::address::NetworkUnchecked>>()
+                    {
                         // Verify it's a valid address for the appropriate network
-                        let network = if prefix == "bc1" { Network::Bitcoin } else { Network::Testnet };
+                        let network = if prefix == "bc1" {
+                            Network::Bitcoin
+                        } else {
+                            Network::Testnet
+                        };
                         if addr.is_valid_for_network(network) {
                             return Some(addr_str.to_string());
                         }
@@ -376,15 +447,21 @@ impl IntentContract {
         for prefix in ['1', '3'] {
             if let Some(start) = input.find(prefix) {
                 let addr_start = start;
-                let addr_end = input[addr_start..].find(|c: char| !c.is_alphanumeric()).unwrap_or(input.len() - addr_start);
+                let addr_end = input[addr_start..]
+                    .find(|c: char| !c.is_alphanumeric())
+                    .unwrap_or(input.len() - addr_start);
                 let addr_str = &input[addr_start..addr_start + addr_end];
 
                 // Validate legacy address length and format
                 if addr_str.len() >= 26 && addr_str.len() <= 35 {
                     // Try to parse as a valid Bitcoin address
-                    if let Ok(addr) = addr_str.parse::<Address<bitcoin::address::NetworkUnchecked>>() {
+                    if let Ok(addr) =
+                        addr_str.parse::<Address<bitcoin::address::NetworkUnchecked>>()
+                    {
                         // Verify it's a valid address for testnet (since we're using tb1 above)
-                        if addr.is_valid_for_network(Network::Testnet) || addr.is_valid_for_network(Network::Bitcoin) {
+                        if addr.is_valid_for_network(Network::Testnet)
+                            || addr.is_valid_for_network(Network::Bitcoin)
+                        {
                             return Some(addr_str.to_string());
                         }
                     }
@@ -397,7 +474,9 @@ impl IntentContract {
 
     /// Encode function call using alloy-sol-types
     pub fn encode_intent_locker_call(&self, intent_id: B256) -> String {
-        let call = IntentSystem::intentLockerCall { intentId: intent_id.into() };
+        let call = IntentSystem::intentLockerCall {
+            intentId: intent_id.into(),
+        };
         format!("0x{}", hex::encode(call.abi_encode()))
     }
 
@@ -405,7 +484,7 @@ impl IntentContract {
     pub fn encode_lock_intent_call(&self, intent_id: B256, data: &[u8]) -> String {
         let call = IntentSystem::lockIntentForSolvingCall {
             intentId: intent_id.into(),
-            data: Bytes::from(data.to_vec())
+            data: Bytes::from(data.to_vec()),
         };
         format!("0x{}", hex::encode(call.abi_encode()))
     }
@@ -414,7 +493,7 @@ impl IntentContract {
     pub fn encode_solve_intent_call(&self, intent_id: B256, data: &[u8]) -> String {
         let call = IntentSystem::solveIntentCall {
             intentId: intent_id.into(),
-            data: Bytes::from(data.to_vec())
+            data: Bytes::from(data.to_vec()),
         };
         format!("0x{}", hex::encode(call.abi_encode()))
     }
@@ -423,14 +502,16 @@ impl IntentContract {
     pub fn encode_store_blob_call(&self, data: &[u8], expiry_time: u64) -> String {
         let call = IntentSystem::storeBlobCall {
             data: Bytes::from(data.to_vec()),
-            expiryTime: U256::from(expiry_time)
+            expiryTime: U256::from(expiry_time),
         };
         format!("0x{}", hex::encode(call.abi_encode()))
     }
 
     /// Encode function call for prolongBlob(blobHash)
     pub fn encode_prolong_blob_call(&self, blob_hash: B256) -> String {
-        let call = IntentSystem::prolongBlobCall { blobHash: blob_hash.into() };
+        let call = IntentSystem::prolongBlobCall {
+            blobHash: blob_hash.into(),
+        };
         format!("0x{}", hex::encode(call.abi_encode()))
     }
 
@@ -438,17 +519,22 @@ impl IntentContract {
     pub fn encode_intent_call(&self, intent_data: &[u8], nonce: u64) -> String {
         let call = IntentSystem::intentCall {
             intentData: Bytes::from(intent_data.to_vec()),
-            nonce: U256::from(nonce)
+            nonce: U256::from(nonce),
         };
         format!("0x{}", hex::encode(call.abi_encode()))
     }
 
     /// Encode function call for intentFromBlob(blobHash, nonce, extraData)
-    pub fn encode_intent_from_blob_call(&self, blob_hash: B256, nonce: u64, extra_data: &[u8]) -> String {
+    pub fn encode_intent_from_blob_call(
+        &self,
+        blob_hash: B256,
+        nonce: u64,
+        extra_data: &[u8],
+    ) -> String {
         let call = IntentSystem::intentFromBlobCall {
             blobHash: blob_hash.into(),
             nonce: U256::from(nonce),
-            extraData: Bytes::from(extra_data.to_vec())
+            extraData: Bytes::from(extra_data.to_vec()),
         };
         format!("0x{}", hex::encode(call.abi_encode()))
     }
@@ -457,7 +543,7 @@ impl IntentContract {
     pub fn encode_cancel_intent_call(&self, intent_id: B256, data: &[u8]) -> String {
         let call = IntentSystem::cancelIntentCall {
             intentId: intent_id.into(),
-            data: Bytes::from(data.to_vec())
+            data: Bytes::from(data.to_vec()),
         };
         format!("0x{}", hex::encode(call.abi_encode()))
     }
@@ -466,32 +552,40 @@ impl IntentContract {
     pub fn encode_cancel_intent_lock_call(&self, intent_id: B256, data: &[u8]) -> String {
         let call = IntentSystem::cancelIntentLockCall {
             intentId: intent_id.into(),
-            data: Bytes::from(data.to_vec())
+            data: Bytes::from(data.to_vec()),
         };
         format!("0x{}", hex::encode(call.abi_encode()))
     }
 
     /// Encode function call for isIntentSolved(intentId)
     pub fn encode_is_intent_solved_call(&self, intent_id: B256) -> String {
-        let call = IntentSystem::isIntentSolvedCall { intentId: intent_id.into() };
+        let call = IntentSystem::isIntentSolvedCall {
+            intentId: intent_id.into(),
+        };
         format!("0x{}", hex::encode(call.abi_encode()))
     }
 
     /// Encode function call for valueStoredInIntent(intentId)
     pub fn encode_value_stored_in_intent_call(&self, intent_id: B256) -> String {
-        let call = IntentSystem::valueStoredInIntentCall { intentId: intent_id.into() };
+        let call = IntentSystem::valueStoredInIntentCall {
+            intentId: intent_id.into(),
+        };
         format!("0x{}", hex::encode(call.abi_encode()))
     }
 
     /// Encode function call for blobStored(blobHash)
     pub fn encode_blob_stored_call(&self, blob_hash: B256) -> String {
-        let call = IntentSystem::blobStoredCall { blobHash: blob_hash.into() };
+        let call = IntentSystem::blobStoredCall {
+            blobHash: blob_hash.into(),
+        };
         format!("0x{}", hex::encode(call.abi_encode()))
     }
 
     /// Parse intent locker response
     pub fn parse_intent_locker_response(&self, response: &str) -> Result<Option<Address>> {
-        if response == "0x" || response == "0x0000000000000000000000000000000000000000000000000000000000000000" {
+        if response == "0x"
+            || response == "0x0000000000000000000000000000000000000000000000000000000000000000"
+        {
             return Ok(None);
         }
 
@@ -548,7 +642,10 @@ mod tests {
     #[test]
     fn test_exit_marketplace_address() {
         let address = IntentContract::exit_marketplace();
-        assert_eq!(address.to_string(), "0x0000000000000000000000000000000000000045");
+        assert_eq!(
+            address.to_string(),
+            "0x0000000000000000000000000000000000000045"
+        );
     }
 
     #[test]

@@ -1,11 +1,13 @@
 use anyhow::Result;
-use bitcoincore_rpc::{Auth, Client, RpcApi};
-use bitcoincore_rpc::bitcoin::{Address, Network, Txid as RpcTxid, Amount as RpcAmount, ScriptBuf as RpcScriptBuf};
-use bitcoin::Txid;
-use bdk_wallet::keys::{bip39::Mnemonic, DerivableKey, ExtendedKey};
-use bdk_wallet::{KeychainKind, PersistedWallet};
 use bdk_electrum::electrum_client;
 use bdk_electrum::electrum_client::ElectrumApi;
+use bdk_wallet::keys::{bip39::Mnemonic, DerivableKey, ExtendedKey};
+use bdk_wallet::{KeychainKind, PersistedWallet};
+use bitcoin::Txid;
+use bitcoincore_rpc::bitcoin::{
+    Address, Amount as RpcAmount, Network, ScriptBuf as RpcScriptBuf, Txid as RpcTxid,
+};
+use bitcoincore_rpc::{Auth, Client, RpcApi};
 use serde_json::json;
 use std::str::FromStr;
 use tracing::{debug, info, warn};
@@ -94,10 +96,12 @@ impl BitcoinClient {
             .map_err(|e| anyhow::anyhow!("Invalid mnemonic: {}", e))?;
 
         // Derive extended key
-        let xkey: ExtendedKey = mnemonic.into_extended_key()
+        let xkey: ExtendedKey = mnemonic
+            .into_extended_key()
             .map_err(|e| anyhow::anyhow!("Failed to derive extended key: {}", e))?;
 
-        let xprv = xkey.into_xprv(network)
+        let xprv = xkey
+            .into_xprv(network)
             .ok_or_else(|| anyhow::anyhow!("Failed to create xprv for network"))?;
 
         // Create wallet descriptors (BIP84 - Native SegWit)
@@ -155,16 +159,20 @@ impl BitcoinClient {
     /// Refresh wallet balance by syncing with the blockchain
     pub async fn refresh_balance(&mut self) -> Result<u64> {
         info!("🔄 Syncing wallet with blockchain...");
-        
+
         // Get database connection for persistence
         let mut conn = self.get_db()?;
-        
+
         // Sync wallet based on network
         match self.network {
             Network::Regtest => {
                 // Use bitcoind RPC for regtest
                 match &self.backend {
-                    BitcoinBackend::Rpc { url, username, password } => {
+                    BitcoinBackend::Rpc {
+                        url,
+                        username,
+                        password,
+                    } => {
                         use bdk_bitcoind_rpc::bitcoincore_rpc::Auth as RpcAuth;
                         use bdk_bitcoind_rpc::bitcoincore_rpc::Client;
                         use bdk_bitcoind_rpc::Emitter;
@@ -185,14 +193,19 @@ impl BitcoinClient {
                         );
 
                         while let Some(block_emission) = emitter.next_block()? {
-                            self.wallet.apply_block(&block_emission.block, block_emission.block_height())?;
+                            self.wallet.apply_block(
+                                &block_emission.block,
+                                block_emission.block_height(),
+                            )?;
                         }
 
                         self.wallet.persist(&mut conn)?;
                         info!("✅ Wallet synced with Bitcoin RPC");
                     }
                     BitcoinBackend::Electrum { .. } => {
-                        return Err(anyhow::anyhow!("Electrum backend not supported for regtest"));
+                        return Err(anyhow::anyhow!(
+                            "Electrum backend not supported for regtest"
+                        ));
                     }
                 }
             }
@@ -223,14 +236,16 @@ impl BitcoinClient {
                 }
             }
         }
-        
+
         // Get the synced balance
         let balance = self.wallet.balance().total().to_sat();
-        info!("💰 Synced balance: {} sats ({:.8} BTC)", balance, balance as f64 / 100_000_000.0);
+        info!(
+            "💰 Synced balance: {} sats ({:.8} BTC)",
+            balance,
+            balance as f64 / 100_000_000.0
+        );
         Ok(balance)
     }
-
-
 
     /// Test connection to configured backend
     pub async fn test_connection(&self) -> Result<u64> {
@@ -239,17 +254,23 @@ impl BitcoinClient {
                 let client = electrum_client::Client::new(url)
                     .map_err(|e| anyhow::anyhow!("Failed to connect to Electrum: {}", e))?;
 
-                let header = client.block_headers_subscribe()
+                let header = client
+                    .block_headers_subscribe()
                     .map_err(|e| anyhow::anyhow!("Failed to subscribe to block headers: {}", e))?;
 
                 Ok(header.height as u64)
             }
-            BitcoinBackend::Rpc { url, username, password } => {
+            BitcoinBackend::Rpc {
+                url,
+                username,
+                password,
+            } => {
                 let auth = Auth::UserPass(username.clone(), password.clone());
                 let client = Client::new(url, auth)
                     .map_err(|e| anyhow::anyhow!("Failed to connect to Bitcoin RPC: {}", e))?;
 
-                let blockchain_info = client.get_blockchain_info()
+                let blockchain_info = client
+                    .get_blockchain_info()
                     .map_err(|e| anyhow::anyhow!("Failed to get blockchain info: {}", e))?;
 
                 Ok(blockchain_info.blocks)
@@ -257,12 +278,16 @@ impl BitcoinClient {
         }
     }
 
-
     /// Send Bitcoin to an address with intent_id tag (tagged fill)
     /// Creates a transaction with exactly 2 outputs:
     /// - Output 0: Payment to user's Bitcoin address
     /// - Output 1: OP_RETURN with 32-byte intent_id tag
-    pub async fn send_to_address(&mut self, address: &str, amount_sats: u64, intent_id: &str) -> Result<String> {
+    pub async fn send_to_address(
+        &mut self,
+        address: &str,
+        amount_sats: u64,
+        intent_id: &str,
+    ) -> Result<String> {
         info!(
             "💰 Sending {} sats ({:.8} BTC) to {} for intent {}",
             amount_sats,
@@ -281,9 +306,12 @@ impl BitcoinClient {
         let intent_id_hex = intent_id.trim_start_matches("0x");
         let intent_id_bytes = hex::decode(intent_id_hex)
             .map_err(|e| anyhow::anyhow!("Invalid intent_id hex: {}", e))?;
-        
+
         if intent_id_bytes.len() != 32 {
-            return Err(anyhow::anyhow!("Intent ID must be exactly 32 bytes, got {} bytes", intent_id_bytes.len()));
+            return Err(anyhow::anyhow!(
+                "Intent ID must be exactly 32 bytes, got {} bytes",
+                intent_id_bytes.len()
+            ));
         }
 
         // Build OP_RETURN script with intent_id manually
@@ -298,18 +326,24 @@ impl BitcoinClient {
 
         // Build transaction with both outputs
         let mut tx_builder = self.wallet.build_tx();
-        
+
         // Output 0: Payment to user
-        tx_builder.add_recipient(dest_address.script_pubkey(), RpcAmount::from_sat(amount_sats));
-        
+        tx_builder.add_recipient(
+            dest_address.script_pubkey(),
+            RpcAmount::from_sat(amount_sats),
+        );
+
         // Output 1: OP_RETURN with intent_id tag
         tx_builder.add_recipient(rpc_op_return_script, RpcAmount::from_sat(0));
 
-        let mut psbt = tx_builder.finish()
+        let mut psbt = tx_builder
+            .finish()
             .map_err(|e| anyhow::anyhow!("Failed to build transaction: {}", e))?;
 
         // Sign transaction
-        let finalized = self.wallet.sign(&mut psbt, Default::default())
+        let finalized = self
+            .wallet
+            .sign(&mut psbt, Default::default())
             .map_err(|e| anyhow::anyhow!("Failed to sign transaction: {}", e))?;
 
         if !finalized {
@@ -317,7 +351,8 @@ impl BitcoinClient {
         }
 
         // Extract transaction
-        let tx = psbt.extract_tx()
+        let tx = psbt
+            .extract_tx()
             .map_err(|e| anyhow::anyhow!("Failed to extract transaction: {}", e))?;
 
         let txid = tx.compute_txid();
@@ -325,11 +360,18 @@ impl BitcoinClient {
         // Verify transaction has at least 2 outputs (payment + OP_RETURN)
         // There may be a 3rd output for change if needed
         if tx.output.len() < 2 {
-            return Err(anyhow::anyhow!("Transaction must have at least 2 outputs (payment + OP_RETURN), got {}", tx.output.len()));
+            return Err(anyhow::anyhow!(
+                "Transaction must have at least 2 outputs (payment + OP_RETURN), got {}",
+                tx.output.len()
+            ));
         }
-        
+
         if tx.output.len() > 2 {
-            info!("💰 Transaction has {} outputs (includes {} sat change output)", tx.output.len(), tx.output[2].value.to_sat());
+            info!(
+                "💰 Transaction has {} outputs (includes {} sat change output)",
+                tx.output.len(),
+                tx.output[2].value.to_sat()
+            );
         }
 
         // Broadcast transaction via configured backend
@@ -338,29 +380,37 @@ impl BitcoinClient {
                 let client = electrum_client::Client::new(url)
                     .map_err(|e| anyhow::anyhow!("Failed to connect to Electrum: {}", e))?;
 
-                client.transaction_broadcast(&tx)
+                client
+                    .transaction_broadcast(&tx)
                     .map_err(|e| anyhow::anyhow!("Failed to broadcast transaction: {}", e))?;
             }
-            BitcoinBackend::Rpc { url, username, password } => {
+            BitcoinBackend::Rpc {
+                url,
+                username,
+                password,
+            } => {
                 let auth = Auth::UserPass(username.clone(), password.clone());
                 let client = Client::new(url, auth)
                     .map_err(|e| anyhow::anyhow!("Failed to connect to Bitcoin RPC: {}", e))?;
 
-                client.send_raw_transaction(&tx)
+                client
+                    .send_raw_transaction(&tx)
                     .map_err(|e| anyhow::anyhow!("Failed to broadcast transaction: {}", e))?;
             }
         }
 
         info!("📍 Transaction ID: {}", txid);
         info!("🏷️  Tagged with intent_id: {} (32 bytes)", intent_id);
-        info!("📤 Transaction structure: {} outputs (payment + OP_RETURN tag)", tx.output.len());
+        info!(
+            "📤 Transaction structure: {} outputs (payment + OP_RETURN tag)",
+            tx.output.len()
+        );
         Ok(txid.to_string())
     }
 
     /// Get transaction information
     pub async fn get_transaction(&self, txid: &str) -> Result<serde_json::Value> {
-        let txid = Txid::from_str(txid)
-            .map_err(|e| anyhow::anyhow!("Invalid txid: {}", e))?;
+        let txid = Txid::from_str(txid).map_err(|e| anyhow::anyhow!("Invalid txid: {}", e))?;
 
         match &self.backend {
             BitcoinBackend::Electrum { url } => {
@@ -372,7 +422,8 @@ impl BitcoinClient {
                 let electrum_txid = bitcoincore_rpc::bitcoin::Txid::from_str(&electrum_txid_str)
                     .map_err(|e| anyhow::anyhow!("Failed to convert txid: {}", e))?;
 
-                let _tx = client.transaction_get(&electrum_txid)
+                let _tx = client
+                    .transaction_get(&electrum_txid)
                     .map_err(|e| anyhow::anyhow!("Failed to get transaction: {}", e))?;
 
                 // For Electrum, we'll use a simplified confirmation count
@@ -387,7 +438,11 @@ impl BitcoinClient {
                     "blocktime": 0, // Electrum doesn't provide this in the same way
                 }))
             }
-            BitcoinBackend::Rpc { url, username, password } => {
+            BitcoinBackend::Rpc {
+                url,
+                username,
+                password,
+            } => {
                 let auth = Auth::UserPass(username.clone(), password.clone());
                 let client = Client::new(url, auth)
                     .map_err(|e| anyhow::anyhow!("Failed to connect to Bitcoin RPC: {}", e))?;
@@ -397,7 +452,8 @@ impl BitcoinClient {
                     .map_err(|e| anyhow::anyhow!("Failed to convert txid: {}", e))?;
 
                 // Use getrawtransaction instead of gettransaction (doesn't require wallet)
-                let tx_info = client.get_raw_transaction_info(&rpc_txid, None)
+                let tx_info = client
+                    .get_raw_transaction_info(&rpc_txid, None)
                     .map_err(|e| anyhow::anyhow!("Failed to get transaction: {}", e))?;
 
                 // Get block height if the transaction is in a block
@@ -424,7 +480,10 @@ impl BitcoinClient {
 
     /// Wait for transaction confirmations
     pub async fn wait_for_confirmation(&self, txid: &str, confirmations: u32) -> Result<()> {
-        info!("⏳ Waiting for {} confirmations of transaction {}", confirmations, txid);
+        info!(
+            "⏳ Waiting for {} confirmations of transaction {}",
+            confirmations, txid
+        );
 
         loop {
             match self.get_transaction(txid).await {
@@ -432,10 +491,16 @@ impl BitcoinClient {
                     if let Some(confirmations_count) = tx_info.get("confirmations") {
                         let confs = confirmations_count.as_u64().unwrap_or(0) as u32;
                         if confs >= confirmations {
-                            info!("✅ Transaction {} confirmed with {} confirmations", txid, confs);
+                            info!(
+                                "✅ Transaction {} confirmed with {} confirmations",
+                                txid, confs
+                            );
                             return Ok(());
                         }
-                        debug!("Transaction {} has {} confirmations, waiting for {}", txid, confs, confirmations);
+                        debug!(
+                            "Transaction {} has {} confirmations, waiting for {}",
+                            txid, confs, confirmations
+                        );
                     }
                 }
                 Err(e) => {
@@ -458,7 +523,7 @@ impl BitcoinClient {
             let amount_sats = utxo.txout.value;
 
             // Filter by minimum amount if specified
-        if let Some(min) = min_amount {
+            if let Some(min) = min_amount {
                 if amount_sats.to_sat() < min {
                     continue;
                 }
@@ -535,12 +600,16 @@ impl BitcoinClient {
                     Ok(_tx) => {
                         // TODO: Implement proper Electrum confirmation counting
                         // For now, return 0 (unconfirmed)
-            Ok(0)
+                        Ok(0)
                     }
                     Err(_) => Ok(0), // Not found or unconfirmed
                 }
             }
-            BitcoinBackend::Rpc { url, username, password } => {
+            BitcoinBackend::Rpc {
+                url,
+                username,
+                password,
+            } => {
                 let auth = Auth::UserPass(username.clone(), password.clone());
                 let client = Client::new(url, auth)
                     .map_err(|e| anyhow::anyhow!("Failed to connect to Bitcoin RPC: {}", e))?;
