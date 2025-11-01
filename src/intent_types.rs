@@ -1,5 +1,5 @@
-use anyhow::Result;
 use alloy_primitives::U256;
+use anyhow::Result;
 use ciborium::{from_reader, into_writer};
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
@@ -78,9 +78,12 @@ impl AnchorBitcoinFill {
 
     pub fn parse_bitcoin_address(&self, network: bitcoin::Network) -> Result<String> {
         use tracing::debug;
-        
+
         // The bitcoin_address is stored as UTF-8 bytes of the address string
-        debug!("Parsing bitcoin_address from {} bytes", self.bitcoin_address.len());
+        debug!(
+            "Parsing bitcoin_address from {} bytes",
+            self.bitcoin_address.len()
+        );
         let address_str = String::from_utf8(self.bitcoin_address.clone())
             .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in bitcoin_address: {}", e))?;
         debug!("Address string: {}", address_str);
@@ -88,13 +91,15 @@ impl AnchorBitcoinFill {
         // Validate it's a valid Bitcoin address for the configured network
         // In bitcoin 0.32, Address parsing returns Address<NetworkUnchecked>
         use bitcoin::address::{Address, NetworkUnchecked};
-        
+
         debug!("Parsing address for network: {:?}", network);
-        let unchecked_addr: Address<NetworkUnchecked> = address_str.parse()
-            .map_err(|e| anyhow::anyhow!("Failed to parse Bitcoin address '{}': {}", address_str, e))?;
+        let unchecked_addr: Address<NetworkUnchecked> = address_str.parse().map_err(|e| {
+            anyhow::anyhow!("Failed to parse Bitcoin address '{}': {}", address_str, e)
+        })?;
         debug!("Address parsed successfully, validating network...");
-        
-        unchecked_addr.require_network(network)
+
+        unchecked_addr
+            .require_network(network)
             .map_err(|e| anyhow::anyhow!("Address network validation failed: {}", e))?;
         debug!("✅ Address validated for network {:?}", network);
 
@@ -124,7 +129,8 @@ pub fn create_anchor_bitcoin_fill_intent(
     max_fee: U256,
     expire_by: u64,
 ) -> Result<IntentData> {
-    let fill_data = AnchorBitcoinFill::from_bitcoin_address(bitcoin_address, amount, max_fee, expire_by)?;
+    let fill_data =
+        AnchorBitcoinFill::from_bitcoin_address(bitcoin_address, amount, max_fee, expire_by)?;
     let fill_cbor = fill_data.to_cbor()?;
 
     Ok(IntentData {
@@ -189,9 +195,12 @@ mod tests {
             U256::from(1000),
             U256::from(100),
             1234567890,
-        ).unwrap();
+        )
+        .unwrap();
 
-        let parsed_address = fill_data.parse_bitcoin_address(bitcoin::Network::Testnet).unwrap();
+        let parsed_address = fill_data
+            .parse_bitcoin_address(bitcoin::Network::Testnet)
+            .unwrap();
         assert_eq!(parsed_address, test_address);
     }
 
@@ -202,12 +211,8 @@ mod tests {
         let max_fee = U256::from(100);
         let expire_by = 1234567890;
 
-        let intent_data = create_anchor_bitcoin_fill_intent(
-            test_address,
-            amount,
-            max_fee,
-            expire_by,
-        ).unwrap();
+        let intent_data =
+            create_anchor_bitcoin_fill_intent(test_address, amount, max_fee, expire_by).unwrap();
 
         assert_eq!(intent_data.intent_type, IntentType::AnchorBitcoinFill);
 
@@ -216,7 +221,9 @@ mod tests {
         assert_eq!(fill_data.max_fee, max_fee);
         assert_eq!(fill_data.expire_by, expire_by);
 
-        let parsed_address = fill_data.parse_bitcoin_address(bitcoin::Network::Testnet).unwrap();
+        let parsed_address = fill_data
+            .parse_bitcoin_address(bitcoin::Network::Testnet)
+            .unwrap();
         assert_eq!(parsed_address, test_address);
     }
 }

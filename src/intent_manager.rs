@@ -1,5 +1,5 @@
-use anyhow::Result;
 use alloy_primitives::{Address, U256};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{debug, info};
@@ -20,13 +20,13 @@ pub struct UserIntent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum IntentStatus {
-    Pending,                    // Intent detected but not yet locked
-    AwaitingSuccessfulLock,     // We've attempted to lock, waiting for confirmation
-    Locked,                     // We've successfully locked the intent for solving
-    Fulfilling,                 // We're in the process of fulfilling (sent BTC)
-    Fulfilled,                  // BTC sent and confirmed, ready to solve
-    Solved,                     // Intent solved on Core Lane
-    Failed,                     // Something went wrong
+    Pending,                // Intent detected but not yet locked
+    AwaitingSuccessfulLock, // We've attempted to lock, waiting for confirmation
+    Locked,                 // We've successfully locked the intent for solving
+    Fulfilling,             // We're in the process of fulfilling (sent BTC)
+    Fulfilled,              // BTC sent and confirmed, ready to solve
+    Solved,                 // Intent solved on Core Lane
+    Failed,                 // Something went wrong
 }
 
 #[derive(Debug, Clone)]
@@ -83,8 +83,10 @@ impl IntentManager {
         self.active_intents.insert(intent_id.clone(), intent);
         self.processing_intents.insert(intent_id.clone());
 
-        info!("📝 Added new intent: {} ({} laneBTC -> {})",
-              intent_id, intent_data.lane_btc_amount, btc_dest);
+        info!(
+            "📝 Added new intent: {} ({} laneBTC -> {})",
+            intent_id, intent_data.lane_btc_amount, btc_dest
+        );
 
         Ok(())
     }
@@ -99,7 +101,10 @@ impl IntentManager {
 
     pub fn update_intent_status(&mut self, intent_id: &str, status: IntentStatus) -> Result<()> {
         if let Some(intent) = self.active_intents.get_mut(intent_id) {
-            info!("🔄 Intent {} status: {:?} -> {:?}", intent_id, intent.status, status);
+            info!(
+                "🔄 Intent {} status: {:?} -> {:?}",
+                intent_id, intent.status, status
+            );
             intent.status = status;
             Ok(())
         } else {
@@ -111,21 +116,33 @@ impl IntentManager {
         if let Some(intent) = self.active_intents.get_mut(intent_id) {
             intent.bitcoin_txid = Some(txid);
             intent.status = IntentStatus::Fulfilling;
-            info!("🔗 Intent {} linked to Bitcoin transaction: {}", intent_id, intent.bitcoin_txid.as_ref().unwrap());
+            info!(
+                "🔗 Intent {} linked to Bitcoin transaction: {}",
+                intent_id,
+                intent.bitcoin_txid.as_ref().unwrap()
+            );
             Ok(())
         } else {
             Err(anyhow::anyhow!("Intent {} not found", intent_id))
         }
     }
 
-    pub fn update_bitcoin_confirmations(&mut self, intent_id: &str, confirmations: u32) -> Result<()> {
+    pub fn update_bitcoin_confirmations(
+        &mut self,
+        intent_id: &str,
+        confirmations: u32,
+    ) -> Result<()> {
         if let Some(intent) = self.active_intents.get_mut(intent_id) {
             intent.bitcoin_confirmations = Some(confirmations);
 
             // If we have enough confirmations, mark as fulfilled
-            if confirmations >= 1 { // Require at least 1 confirmation
+            if confirmations >= 1 {
+                // Require at least 1 confirmation
                 intent.status = IntentStatus::Fulfilled;
-                info!("✅ Intent {} Bitcoin transaction confirmed with {} confirmations", intent_id, confirmations);
+                info!(
+                    "✅ Intent {} Bitcoin transaction confirmed with {} confirmations",
+                    intent_id, confirmations
+                );
             }
 
             Ok(())

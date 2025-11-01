@@ -12,7 +12,8 @@ async fn test_bitcoin_client_creation_rpc() {
         TEST_MNEMONIC.to_string(),
         "regtest".to_string(),
         "test-wallet".to_string(),
-    ).await;
+    )
+    .await;
 
     match result {
         Ok(_client) => {}
@@ -27,7 +28,8 @@ async fn test_bitcoin_client_creation_electrum() {
         TEST_MNEMONIC.to_string(),
         "regtest".to_string(),
         "test-wallet-electrum".to_string(),
-    ).await;
+    )
+    .await;
 
     match result {
         Ok(_client) => {}

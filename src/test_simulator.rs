@@ -1,32 +1,30 @@
+use alloy_primitives::{Address, Bytes, B256};
 use anyhow::Result;
-use alloy_primitives::{Address, B256, Bytes};
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::str::FromStr;
 
-use crate::core_lane_client::CoreLaneClient;
 use crate::intent_contract::IntentContract;
 
 /// Test the filler bot against the IntentSystem simulator contract
 pub struct SimulatorTester {
-    client: CoreLaneClient,
+    provider_url: String,
     contract: IntentContract,
     simulator_address: Address,
     test_account: Address,
 }
 
 impl SimulatorTester {
-    pub fn new(rpc_url: String, simulator_address: Address) -> Self {
-        let client = CoreLaneClient::new(rpc_url);
+    pub fn new(rpc_url: String, simulator_address: Address) -> anyhow::Result<Self> {
         let contract = IntentContract::new(simulator_address);
 
         let test_account = Address::from_str("0x1234567890123456789012345678901234567890").unwrap();
 
-        Self {
-            client,
+        Ok(Self {
+            provider_url: rpc_url,
             contract,
             simulator_address,
             test_account,
-        }
+        })
     }
 
     /// Test blob storage functionality
@@ -38,7 +36,8 @@ impl SimulatorTester {
         let expiry_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs() + 86400; // 1 day from now
+            .as_secs()
+            + 86400; // 1 day from now
 
         // Store blob
         println!("📦 Storing blob...");
@@ -95,7 +94,9 @@ impl SimulatorTester {
         let blob_hash = B256::from([1u8; 32]);
         let extra_data = b"extra data for intent from blob";
         println!("📝 Creating intent from blob...");
-        let intent_from_blob_call = self.contract.encode_intent_from_blob_call(blob_hash, nonce, extra_data);
+        let intent_from_blob_call = self
+            .contract
+            .encode_intent_from_blob_call(blob_hash, nonce, extra_data);
         println!("📞 Intent from blob call data: {}", intent_from_blob_call);
 
         println!("✅ Intent creation test completed");
@@ -126,7 +127,9 @@ impl SimulatorTester {
 
         // Test cancel intent lock
         println!("🔓 Testing cancel intent lock...");
-        let cancel_lock_call = self.contract.encode_cancel_intent_lock_call(intent_id, data);
+        let cancel_lock_call = self
+            .contract
+            .encode_cancel_intent_lock_call(intent_id, data);
         println!("📞 Cancel intent lock call data: {}", cancel_lock_call);
 
         println!("✅ Intent management test completed");
@@ -186,15 +189,16 @@ impl SimulatorTester {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_simulator_creation() {
-        let simulator_addr = Address::from_slice(&hex::decode("1234567890123456789012345678901234567890").unwrap());
-        let tester = SimulatorTester::new("http://127.0.0.1:8545".to_string(), simulator_addr);
+        let simulator_addr =
+            Address::from_slice(&hex::decode("1234567890123456789012345678901234567890").unwrap());
+        let tester =
+            SimulatorTester::new("http://127.0.0.1:8545".to_string(), simulator_addr).unwrap();
 
         // Test that we can create the tester
         assert_eq!(tester.simulator_address, simulator_addr);
@@ -202,7 +206,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_function_encoding() {
-        let simulator_addr = Address::from_slice(&hex::decode("1234567890123456789012345678901234567890").unwrap());
+        let simulator_addr =
+            Address::from_slice(&hex::decode("1234567890123456789012345678901234567890").unwrap());
         let contract = IntentContract::new(simulator_addr);
 
         // Test that we can encode function calls

@@ -1,5 +1,5 @@
-use lanelayer_filler_bot::intent_manager::{IntentManager, IntentData, IntentStatus};
 use alloy_primitives::{Address, U256};
+use lanelayer_filler_bot::intent_manager::{IntentData, IntentManager, IntentStatus};
 use std::str::FromStr;
 
 #[test]
@@ -26,7 +26,9 @@ fn test_intent_manager_basic_operations() {
     assert_eq!(pending[0].intent_id, "0x1234567890abcdef");
 
     // Test updating status
-    assert!(manager.update_intent_status("0x1234567890abcdef", IntentStatus::Locked).is_ok());
+    assert!(manager
+        .update_intent_status("0x1234567890abcdef", IntentStatus::Locked)
+        .is_ok());
     assert_eq!(manager.get_intent_count_by_status(IntentStatus::Locked), 1);
     assert_eq!(manager.get_intent_count_by_status(IntentStatus::Pending), 0);
 }
@@ -40,7 +42,7 @@ fn test_intent_fulfillment_calculation() {
         user_address: Address::from_str("0x1234567890123456789012345678901234567890").unwrap(),
         btc_destination: "tb1qexample1234567890abcdefghijklmnopqrstuvwxyz".to_string(),
         lane_btc_amount: U256::from(1000000u64), // 1M sats
-        fee: U256::from(10000u64), // 10K sats
+        fee: U256::from(10000u64),               // 10K sats
     };
 
     let intent = lanelayer_filler_bot::intent_manager::UserIntent {
@@ -96,15 +98,27 @@ fn test_intent_status_transitions() {
     // Test status transitions
     assert_eq!(manager.get_intent_count_by_status(IntentStatus::Pending), 1);
 
-    manager.update_intent_status("0x1234567890abcdef", IntentStatus::Locked).unwrap();
+    manager
+        .update_intent_status("0x1234567890abcdef", IntentStatus::Locked)
+        .unwrap();
     assert_eq!(manager.get_intent_count_by_status(IntentStatus::Locked), 1);
     assert_eq!(manager.get_intent_count_by_status(IntentStatus::Pending), 0);
 
-    manager.update_intent_status("0x1234567890abcdef", IntentStatus::Fulfilling).unwrap();
-    assert_eq!(manager.get_intent_count_by_status(IntentStatus::Fulfilling), 1);
+    manager
+        .update_intent_status("0x1234567890abcdef", IntentStatus::Fulfilling)
+        .unwrap();
+    assert_eq!(
+        manager.get_intent_count_by_status(IntentStatus::Fulfilling),
+        1
+    );
 
-    manager.update_intent_status("0x1234567890abcdef", IntentStatus::Fulfilled).unwrap();
-    assert_eq!(manager.get_intent_count_by_status(IntentStatus::Fulfilled), 1);
+    manager
+        .update_intent_status("0x1234567890abcdef", IntentStatus::Fulfilled)
+        .unwrap();
+    assert_eq!(
+        manager.get_intent_count_by_status(IntentStatus::Fulfilled),
+        1
+    );
 }
 
 #[test]
@@ -128,10 +142,17 @@ fn test_multiple_intents() {
     assert_eq!(manager.get_intent_count_by_status(IntentStatus::Pending), 5);
 
     // Update some intents
-    manager.update_intent_status("0x0000000000000000", IntentStatus::Locked).unwrap();
-    manager.update_intent_status("0x0000000000000001", IntentStatus::Fulfilled).unwrap();
+    manager
+        .update_intent_status("0x0000000000000000", IntentStatus::Locked)
+        .unwrap();
+    manager
+        .update_intent_status("0x0000000000000001", IntentStatus::Fulfilled)
+        .unwrap();
 
     assert_eq!(manager.get_intent_count_by_status(IntentStatus::Pending), 3);
     assert_eq!(manager.get_intent_count_by_status(IntentStatus::Locked), 1);
-    assert_eq!(manager.get_intent_count_by_status(IntentStatus::Fulfilled), 1);
+    assert_eq!(
+        manager.get_intent_count_by_status(IntentStatus::Fulfilled),
+        1
+    );
 }

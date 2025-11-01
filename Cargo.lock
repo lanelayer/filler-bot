@@ -2687,6 +2687,7 @@ dependencies = [
  "alloy-signer-local",
  "alloy-sol-types",
  "alloy-transport",
+ "alloy-transport-http",
  "anyhow",
  "async-trait",
  "bdk_bitcoind_rpc",
@@ -2709,6 +2710,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 

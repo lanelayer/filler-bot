@@ -1,20 +1,24 @@
-use anyhow::Result;
-use alloy_primitives::{Address, U256, B256};
-use std::sync::Arc;
+use alloy_network::{Ethereum, TxSigner};
+use alloy_primitives::{Address, Bytes, B256, U256};
+use alloy_provider::{Provider, ProviderBuilder};
+use alloy_rpc_types::BlockId;
+use alloy_signer_local::PrivateKeySigner;
+use anyhow::{anyhow, Result};
 use std::str::FromStr;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info, warn};
 
-use crate::core_lane_client::CoreLaneClient;
 use crate::bitcoin_client::BitcoinClient;
-use crate::intent_manager::{IntentManager, IntentData, IntentStatus};
-use crate::intent_contract::{IntentContract, decode_intent_calldata, IntentCall};
-use crate::intent_system::{IntentSystem, CoreLaneIntentSystem};
+use crate::intent_contract::{decode_intent_calldata, IntentCall, IntentContract};
+use crate::intent_manager::{IntentData, IntentManager, IntentStatus};
+use crate::intent_system::{CoreLaneIntentSystem, IntentSystem};
 use crate::intent_types::{IntentData as CborIntentData, IntentType};
 
 pub struct FillerBot {
-    core_lane_client: Arc<CoreLaneClient>,
+    provider_url: String,
+    signer: Option<PrivateKeySigner>,
     bitcoin_client: Arc<Mutex<BitcoinClient>>,
     intent_manager: Arc<Mutex<IntentManager>>,
     pub intent_contract: IntentContract,
@@ -27,29 +31,57 @@ pub struct FillerBot {
 
 impl FillerBot {
     pub fn new(
-        core_lane_client: Arc<CoreLaneClient>,
+        provider_url: String,
         bitcoin_client: Arc<Mutex<BitcoinClient>>,
         intent_manager: Arc<Mutex<IntentManager>>,
         exit_marketplace: Address,
         filler_address: Address,
         poll_interval: u64,
     ) -> Self {
-        let intent_system = CoreLaneIntentSystem::new(
-            (*core_lane_client).clone(),
-            exit_marketplace,
-        );
-
         Self {
-            core_lane_client,
+            provider_url: provider_url.clone(),
+            signer: None,
             bitcoin_client,
             intent_manager,
             intent_contract: IntentContract::new(exit_marketplace),
-            intent_system,
+            intent_system: CoreLaneIntentSystem::new(provider_url, exit_marketplace, None),
             exit_marketplace,
             filler_address,
             poll_interval,
             last_processed_block: 0,
         }
+    }
+
+    pub fn new_with_signer(
+        provider_url: String,
+        private_key: &str,
+        bitcoin_client: Arc<Mutex<BitcoinClient>>,
+        intent_manager: Arc<Mutex<IntentManager>>,
+        exit_marketplace: Address,
+        poll_interval: u64,
+    ) -> Result<Self> {
+        let signer: PrivateKeySigner = private_key
+            .parse()
+            .map_err(|e| anyhow!("Invalid private key: {}", e))?;
+        let filler_address = signer.address();
+
+        Ok(Self {
+            provider_url: provider_url.clone(),
+            signer: Some(signer.clone()),
+            bitcoin_client,
+            intent_manager,
+            intent_contract: IntentContract::new(exit_marketplace),
+            intent_system: CoreLaneIntentSystem::new(provider_url, exit_marketplace, Some(signer)),
+            exit_marketplace,
+            filler_address,
+            poll_interval,
+            last_processed_block: 0,
+        })
+    }
+
+    fn get_provider(&self) -> impl Provider<Ethereum> + '_ {
+        let url: url::Url = self.provider_url.parse().expect("Invalid URL");
+        ProviderBuilder::new().connect_http(url)
     }
 
     pub async fn start(&self) -> Result<()> {
@@ -82,26 +114,40 @@ impl FillerBot {
         info!("🔍 Testing connections...");
 
         // Test Core Lane connection
-        let core_lane_block = self.core_lane_client.get_block_number().await?;
+        let provider = self.get_provider();
+        let core_lane_block = provider
+            .get_block_number()
+            .await
+            .map_err(|e| anyhow!("Failed to get block number: {}", e))?;
         info!("✅ Core Lane connected - Latest block: {}", core_lane_block);
 
         // Test Bitcoin connection and generate float address
         let mut bitcoin_client = self.bitcoin_client.lock().await;
         let bitcoin_balance = bitcoin_client.refresh_balance().await?;
-        info!("✅ Bitcoin connected - Wallet Balance: {} sats ({:.8} BTC)",
-              bitcoin_balance, bitcoin_balance as f64 / 100_000_000.0);
+        info!(
+            "✅ Bitcoin connected - Wallet Balance: {} sats ({:.8} BTC)",
+            bitcoin_balance,
+            bitcoin_balance as f64 / 100_000_000.0
+        );
 
         // Generate and display float address for funding
         let float_address = bitcoin_client.generate_float_address().await?;
-        
+
         // Use the synced wallet balance instead of individual address balance
-        info!("📍 Wallet Balance (synced): {} sats ({:.8} BTC)", 
-              bitcoin_balance, bitcoin_balance as f64 / 100_000_000.0);
-        
+        info!(
+            "📍 Wallet Balance (synced): {} sats ({:.8} BTC)",
+            bitcoin_balance,
+            bitcoin_balance as f64 / 100_000_000.0
+        );
+
         info!("");
         info!("🏦 ===== BOT FUNDING ADDRESS =====");
         info!("📍 Float Address: {}", float_address);
-        info!("💰 Wallet Balance: {} sats ({:.8} BTC)", bitcoin_balance, bitcoin_balance as f64 / 100_000_000.0);
+        info!(
+            "💰 Wallet Balance: {} sats ({:.8} BTC)",
+            bitcoin_balance,
+            bitcoin_balance as f64 / 100_000_000.0
+        );
         info!("💡 Send BTC to this address to fund the bot's working capital");
         info!("🏦 ================================");
         info!("");
@@ -111,14 +157,25 @@ impl FillerBot {
 
     async fn poll_cycle(&self, last_block_number: &mut u64) -> Result<()> {
         // Get current block number
-        let current_block = self.core_lane_client.get_block_number().await?;
+        let provider = self.get_provider();
+        let current_block = provider
+            .get_block_number()
+            .await
+            .map_err(|e| anyhow!("Failed to get block number: {}", e))?;
 
         if current_block <= *last_block_number {
-            debug!("No new blocks since last poll (current: {}, last: {})", current_block, last_block_number);
+            debug!(
+                "No new blocks since last poll (current: {}, last: {})",
+                current_block, last_block_number
+            );
             return Ok(());
         }
 
-        info!("📦 Processing blocks {} to {}", *last_block_number + 1, current_block);
+        info!(
+            "📦 Processing blocks {} to {}",
+            *last_block_number + 1,
+            current_block
+        );
 
         // Process each new block
         for block_number in (*last_block_number + 1)..=current_block {
@@ -142,22 +199,34 @@ impl FillerBot {
     /// Check bot balance and warn if it's low (with blockchain sync)
     async fn check_balance(&self) -> Result<()> {
         let mut bitcoin_client = self.bitcoin_client.lock().await;
-        
+
         // Sync with blockchain and get fresh balance
         let balance = bitcoin_client.refresh_balance().await?;
-        
+
         // Define low balance threshold (e.g., 100,000 sats = 0.001 BTC)
         let low_balance_threshold = 100_000; // 0.001 BTC
-        
+
         if balance < low_balance_threshold {
             warn!("⚠️  LOW BALANCE WARNING!");
-            warn!("💰 Current balance: {} sats ({:.8} BTC)", balance, balance as f64 / 100_000_000.0);
+            warn!(
+                "💰 Current balance: {} sats ({:.8} BTC)",
+                balance,
+                balance as f64 / 100_000_000.0
+            );
             warn!("💡 Please fund the bot's float address to continue operations");
-            warn!("🏦 Minimum recommended: {} sats ({:.8} BTC)", low_balance_threshold, low_balance_threshold as f64 / 100_000_000.0);
+            warn!(
+                "🏦 Minimum recommended: {} sats ({:.8} BTC)",
+                low_balance_threshold,
+                low_balance_threshold as f64 / 100_000_000.0
+            );
         } else {
-            debug!("💰 Balance check: {} sats ({:.8} BTC) - OK", balance, balance as f64 / 100_000_000.0);
+            debug!(
+                "💰 Balance check: {} sats ({:.8} BTC) - OK",
+                balance,
+                balance as f64 / 100_000_000.0
+            );
         }
-        
+
         Ok(())
     }
 
@@ -165,12 +234,38 @@ impl FillerBot {
         debug!("🔍 Processing block {}", block_number);
 
         // Get the block with full transaction data
-        let block = self.core_lane_client.get_block_by_number(block_number, true).await?;
+        let provider = self.get_provider();
+        let block_id = BlockId::Number(block_number.into());
+        let block = provider
+            .get_block(block_id)
+            .await
+            .map_err(|e| anyhow!("Failed to get block: {}", e))?
+            .ok_or_else(|| anyhow!("Block {} not found", block_number))?;
 
-        info!("📦 Block {} has {} transactions", block_number, block.transactions.len());
+        // Extract transaction hashes from the block
+        let tx_hashes: Vec<String> = match &block.transactions {
+            alloy_rpc_types::BlockTransactions::Hashes(hashes) => {
+                hashes.iter().map(|h| format!("0x{:x}", h)).collect()
+            }
+            alloy_rpc_types::BlockTransactions::Full(txs) => {
+                // Extract hash from transaction - Transaction has inner field with hash
+                txs.iter()
+                    .map(|tx| format!("0x{:x}", tx.inner.hash()))
+                    .collect()
+            }
+            alloy_rpc_types::BlockTransactions::Uncle => {
+                vec![] // Uncle blocks don't have transactions in the same way
+            }
+        };
+
+        info!(
+            "📦 Block {} has {} transactions",
+            block_number,
+            tx_hashes.len()
+        );
 
         // Process each transaction in the block
-        for tx_hash in &block.transactions {
+        for tx_hash in &tx_hashes {
             if let Err(e) = self.process_transaction(tx_hash).await {
                 debug!("Failed to process transaction {}: {}", tx_hash, e);
                 // Continue with other transactions
@@ -184,19 +279,32 @@ impl FillerBot {
         debug!("🔍 Processing transaction {}", tx_hash);
 
         // Get transaction details
-        let tx = self.core_lane_client.get_transaction_by_hash(tx_hash).await?;
+        let provider = self.get_provider();
+        let hash =
+            B256::from_str(tx_hash).map_err(|e| anyhow!("Invalid transaction hash: {}", e))?;
+        let tx = provider
+            .get_transaction_by_hash(hash)
+            .await
+            .map_err(|e| anyhow!("Failed to get transaction: {}", e))?
+            .ok_or_else(|| anyhow!("Transaction {} not found", tx_hash))?;
 
         // Check if this transaction is to the exit marketplace
-        if let Some(to) = &tx.to {
+        let tx_envelope = tx.inner.inner();
+        if let Some(to_addr) = crate::intent_contract::get_transaction_to(&tx_envelope) {
             let expected = format!("0x{:x}", self.exit_marketplace).to_lowercase();
-            debug!("🔍 Transaction to: {}, expected: {}", to.to_lowercase(), expected);
-            if to.to_lowercase() == expected {
+            let to_str = format!("0x{:x}", to_addr).to_lowercase();
+            debug!("🔍 Transaction to: {}, expected: {}", to_str, expected);
+            if to_str == expected {
                 info!("🎯 Found transaction to exit marketplace: {}", tx_hash);
 
                 // Parse the intent from the transaction using ABI decoding
                 if let Some(intent_data) = self.parse_intent_from_transaction(&tx).await? {
-                    info!("📝 Parsed intent: {} ({} laneBTC -> {})",
-                          intent_data.intent_id, intent_data.lane_btc_amount, intent_data.btc_destination);
+                    info!(
+                        "📝 Parsed intent: {} ({} laneBTC -> {})",
+                        intent_data.intent_id,
+                        intent_data.lane_btc_amount,
+                        intent_data.btc_destination
+                    );
 
                     let mut manager = self.intent_manager.lock().await;
                     manager.add_intent(intent_data)?;
@@ -207,10 +315,13 @@ impl FillerBot {
         Ok(())
     }
 
-    pub async fn parse_intent_from_transaction(&self, tx: &crate::core_lane_client::Transaction) -> Result<Option<IntentData>> {
+    pub async fn parse_intent_from_transaction(
+        &self,
+        tx: &alloy_rpc_types::Transaction,
+    ) -> Result<Option<IntentData>> {
         // Decode input data using ABI decoding
-        let input_hex = tx.input.trim_start_matches("0x");
-        let input_data = hex::decode(input_hex)?;
+        let tx_envelope = tx.inner.inner();
+        let input_data = crate::intent_contract::get_transaction_input_bytes(&tx_envelope);
 
         // Use alloy ABI decoding to parse the intent call
         if let Some(intent_call) = decode_intent_calldata(&input_data) {
@@ -219,35 +330,59 @@ impl FillerBot {
                     // Parse CBOR intent data
                     debug!("📦 Parsing CBOR intent data ({} bytes)", intent_data.len());
                     let cbor_intent = CborIntentData::from_cbor(&intent_data)?;
-                    debug!("✅ CBOR parsed successfully, type: {:?}", cbor_intent.intent_type);
+                    debug!(
+                        "✅ CBOR parsed successfully, type: {:?}",
+                        cbor_intent.intent_type
+                    );
 
                     // Parse Bitcoin address and amount from CBOR intent data
                     debug!("🔍 Parsing Bitcoin address from intent...");
-                    let btc_destination = self.parse_bitcoin_address_from_cbor_intent(&cbor_intent).await?;
+                    let btc_destination = self
+                        .parse_bitcoin_address_from_cbor_intent(&cbor_intent)
+                        .await?;
                     debug!("✅ Bitcoin address parsed: {}", btc_destination);
-                    
+
                     // Parse the actual amount from the CBOR data
                     let fill_data = cbor_intent.parse_anchor_bitcoin_fill()?;
                     let actual_btc_amount = fill_data.amount; // This is the amount to send in BTC
                     let max_fee = fill_data.max_fee;
-                    debug!("💰 Intent amount: {} sats, max_fee: {} sats", actual_btc_amount, max_fee);
+                    debug!(
+                        "💰 Intent amount: {} sats, max_fee: {} sats",
+                        actual_btc_amount, max_fee
+                    );
 
                     // Calculate intent ID using the same method as core-lane
                     // Core Lane uses the TRANSACTION nonce, not the intent function parameter nonce
-                    let from = Address::from_str(&tx.from)?;
-                    let tx_nonce = u64::from_str_radix(&tx.nonce.trim_start_matches("0x"), 16)?;
-                    debug!("Calculating intent ID: sender={:?}, tx_nonce={}, intent_data_len={}", from, tx_nonce, intent_data.len());
-                    debug!("Note: intent function nonce parameter = {}, but using tx nonce for ID", nonce);
-                    let intent_id = crate::intent_contract::calculate_intent_id(from, tx_nonce, intent_data.clone().into());
+                    let tx_envelope = tx.inner.inner();
+                    let from =
+                        crate::intent_contract::get_transaction_from_from_recovered(&tx.inner);
+                    let tx_nonce = crate::intent_contract::get_transaction_nonce(&tx_envelope);
+                    debug!(
+                        "Calculating intent ID: sender={:?}, tx_nonce={}, intent_data_len={}",
+                        from,
+                        tx_nonce,
+                        intent_data.len()
+                    );
+                    debug!(
+                        "Note: intent function nonce parameter = {}, but using tx nonce for ID",
+                        nonce
+                    );
+                    let intent_id = crate::intent_contract::calculate_intent_id(
+                        from,
+                        tx_nonce,
+                        intent_data.clone().into(),
+                    );
                     debug!("Calculated intent_id: {:?}", intent_id);
 
                     // Convert locked value from wei to sats (1 sat = 1 gwei = 10^9 wei)
-                    let value_wei = U256::from_str_radix(&tx.value.trim_start_matches("0x"), 16)?;
+                    let value_wei = crate::intent_contract::get_transaction_value(&tx_envelope);
                     let gwei = U256::from(1_000_000_000u64);
                     let locked_value_sats = value_wei / gwei;
-                    
-                    debug!("💰 Intent locked value: {} wei = {} sats (amount={}, fee={})", 
-                           value_wei, locked_value_sats, actual_btc_amount, max_fee);
+
+                    debug!(
+                        "💰 Intent locked value: {} wei = {} sats (amount={}, fee={})",
+                        value_wei, locked_value_sats, actual_btc_amount, max_fee
+                    );
 
                     return Ok(Some(IntentData {
                         intent_id: format!("0x{:x}", intent_id),
@@ -268,20 +403,28 @@ impl FillerBot {
     }
 
     /// Parse Bitcoin address from CBOR intent data
-    pub async fn parse_bitcoin_address_from_cbor_intent(&self, cbor_intent: &CborIntentData) -> Result<String> {
+    pub async fn parse_bitcoin_address_from_cbor_intent(
+        &self,
+        cbor_intent: &CborIntentData,
+    ) -> Result<String> {
         match cbor_intent.intent_type {
             IntentType::AnchorBitcoinFill => {
                 debug!("Parsing AnchorBitcoinFill from CBOR data...");
-                let fill_data = cbor_intent.parse_anchor_bitcoin_fill()
-                    .map_err(|e| anyhow::anyhow!("Failed to parse AnchorBitcoinFill from CBOR: {}", e))?;
-                debug!("Fill data parsed: amount={}, max_fee={}, expire_by={}", fill_data.amount, fill_data.max_fee, fill_data.expire_by);
-                
+                let fill_data = cbor_intent.parse_anchor_bitcoin_fill().map_err(|e| {
+                    anyhow::anyhow!("Failed to parse AnchorBitcoinFill from CBOR: {}", e)
+                })?;
+                debug!(
+                    "Fill data parsed: amount={}, max_fee={}, expire_by={}",
+                    fill_data.amount, fill_data.max_fee, fill_data.expire_by
+                );
+
                 let bitcoin_client = self.bitcoin_client.lock().await;
                 let network = bitcoin_client.network();
                 drop(bitcoin_client);
-                
+
                 debug!("Parsing Bitcoin address for network: {:?}", network);
-                fill_data.parse_bitcoin_address(network)
+                fill_data
+                    .parse_bitcoin_address(network)
                     .map_err(|e| anyhow::anyhow!("Failed to parse Bitcoin address: {}", e))
             }
         }
@@ -310,15 +453,23 @@ impl FillerBot {
             if let Some(start) = input.find(prefix) {
                 // Find the end of the address (stop at non-alphanumeric characters)
                 let addr_start = start;
-                let addr_end = input[addr_start..].find(|c: char| !c.is_alphanumeric()).unwrap_or(input.len() - addr_start);
+                let addr_end = input[addr_start..]
+                    .find(|c: char| !c.is_alphanumeric())
+                    .unwrap_or(input.len() - addr_start);
                 let addr_str = &input[addr_start..addr_start + addr_end];
 
                 // Validate bech32 address length and format
                 if addr_str.len() >= 26 && addr_str.len() <= 62 {
                     // Try to parse as a valid Bitcoin address
-                    if let Ok(addr) = addr_str.parse::<Address<bitcoin::address::NetworkUnchecked>>() {
+                    if let Ok(addr) =
+                        addr_str.parse::<Address<bitcoin::address::NetworkUnchecked>>()
+                    {
                         // Verify it's a valid address for the appropriate network
-                        let network = if prefix == "bc1" { Network::Bitcoin } else { Network::Testnet };
+                        let network = if prefix == "bc1" {
+                            Network::Bitcoin
+                        } else {
+                            Network::Testnet
+                        };
                         if addr.is_valid_for_network(network) {
                             return Some(addr_str.to_string());
                         }
@@ -331,15 +482,21 @@ impl FillerBot {
         for prefix in ['1', '3'] {
             if let Some(start) = input.find(prefix) {
                 let addr_start = start;
-                let addr_end = input[addr_start..].find(|c: char| !c.is_alphanumeric()).unwrap_or(input.len() - addr_start);
+                let addr_end = input[addr_start..]
+                    .find(|c: char| !c.is_alphanumeric())
+                    .unwrap_or(input.len() - addr_start);
                 let addr_str = &input[addr_start..addr_start + addr_end];
 
                 // Validate legacy address length and format
                 if addr_str.len() >= 26 && addr_str.len() <= 35 {
                     // Try to parse as a valid Bitcoin address
-                    if let Ok(addr) = addr_str.parse::<Address<bitcoin::address::NetworkUnchecked>>() {
+                    if let Ok(addr) =
+                        addr_str.parse::<Address<bitcoin::address::NetworkUnchecked>>()
+                    {
                         // Verify it's a valid address for testnet (since we're using tb1 above)
-                        if addr.is_valid_for_network(Network::Testnet) || addr.is_valid_for_network(Network::Bitcoin) {
+                        if addr.is_valid_for_network(Network::Testnet)
+                            || addr.is_valid_for_network(Network::Bitcoin)
+                        {
                             return Some(addr_str.to_string());
                         }
                     }
@@ -353,7 +510,11 @@ impl FillerBot {
     async fn process_fulfilled_intents(&self) -> Result<()> {
         let fulfilled_intents = {
             let manager = self.intent_manager.lock().await;
-            manager.get_fulfilled_intents().into_iter().cloned().collect::<Vec<_>>()
+            manager
+                .get_fulfilled_intents()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
         };
 
         for intent in fulfilled_intents {
@@ -372,59 +533,76 @@ impl FillerBot {
         info!("🔓 Solving intent: {}", intent.intent_id);
 
         // Get the Bitcoin txid from the intent
-        let bitcoin_txid = intent.bitcoin_txid.as_ref()
+        let bitcoin_txid = intent
+            .bitcoin_txid
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No Bitcoin txid found for intent"))?;
 
         // Get the Bitcoin transaction info to find which block it's in
         let bitcoin_client = self.bitcoin_client.lock().await;
         let tx_info = bitcoin_client.get_transaction(bitcoin_txid).await?;
         drop(bitcoin_client);
-        
+
         // Extract the block number from the transaction info
         // Core Lane uses Bitcoin block numbers, not Core Lane block numbers
-        let bitcoin_block_number = tx_info.get("blockheight")
+        let bitcoin_block_number = tx_info
+            .get("blockheight")
             .or_else(|| tx_info.get("block_height"))
             .or_else(|| tx_info.get("blockNumber"))
             .and_then(|v| v.as_u64())
             .ok_or_else(|| anyhow::anyhow!("No block height in transaction info: {:?}", tx_info))?;
 
-        info!("📍 Bitcoin transaction {} is in Bitcoin block {}", bitcoin_txid, bitcoin_block_number);
+        info!(
+            "📍 Bitcoin transaction {} is in Bitcoin block {}",
+            bitcoin_txid, bitcoin_block_number
+        );
 
         // Prepare solve data: block_height (8 bytes) + txid (32 bytes)
         let mut solve_data = Vec::new();
         solve_data.extend_from_slice(&bitcoin_block_number.to_le_bytes());
-        
+
         // Parse Bitcoin txid and convert to 32 bytes (internal byte order)
         // Bitcoin txids are displayed in reversed byte order, but stored internally in forward order
-        let txid_parsed = bitcoin::Txid::from_str(bitcoin_txid)
-            .map_err(|e| anyhow::anyhow!("Failed to parse Bitcoin txid '{}': {}", bitcoin_txid, e))?;
-        
+        let txid_parsed = bitcoin::Txid::from_str(bitcoin_txid).map_err(|e| {
+            anyhow::anyhow!("Failed to parse Bitcoin txid '{}': {}", bitcoin_txid, e)
+        })?;
+
         // Get the internal byte representation (not display order)
         use bitcoin::hashes::Hash;
         let txid_bytes = txid_parsed.to_byte_array();
-        
+
         debug!("Bitcoin txid (display): {}", bitcoin_txid);
         debug!("Bitcoin txid (internal bytes): {}", hex::encode(txid_bytes));
-        
+
         solve_data.extend_from_slice(&txid_bytes);
 
-        debug!("Solve data: block_number={}, txid={}, total_bytes={}", bitcoin_block_number, bitcoin_txid, solve_data.len());
+        debug!(
+            "Solve data: block_number={}, txid={}, total_bytes={}",
+            bitcoin_block_number,
+            bitcoin_txid,
+            solve_data.len()
+        );
 
         // Call solveIntent on the Core Lane contract using IntentSystem
         let intent_id_bytes = B256::from_str(&intent.intent_id)?;
-        let tx_hash = self.intent_system.solve_intent(intent_id_bytes, &solve_data).await?;
+        let tx_hash = self
+            .intent_system
+            .solve_intent(intent_id_bytes, &solve_data)
+            .await?;
 
         info!("✅ solveIntent transaction sent: {}", tx_hash);
-        
+
         // Wait a bit for the transaction to be mined
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-        
+
         // Verify the intent is actually solved on Core Lane
         match self.intent_system.is_intent_solved(intent_id_bytes).await {
             Ok(true) => {
-                info!("✅ Intent {} solved successfully at Bitcoin block {} with Bitcoin tx {}", 
-                      intent.intent_id, bitcoin_block_number, bitcoin_txid);
-                
+                info!(
+                    "✅ Intent {} solved successfully at Bitcoin block {} with Bitcoin tx {}",
+                    intent.intent_id, bitcoin_block_number, bitcoin_txid
+                );
+
                 // Remove the intent from our active list
                 let mut manager = self.intent_manager.lock().await;
                 manager.update_intent_status(&intent.intent_id, IntentStatus::Solved)?;
@@ -435,7 +613,10 @@ impl FillerBot {
                 // Keep the intent in Fulfilled status so we retry solving next cycle
             }
             Err(e) => {
-                error!("Failed to check if intent {} is solved: {}", intent.intent_id, e);
+                error!(
+                    "Failed to check if intent {} is solved: {}",
+                    intent.intent_id, e
+                );
             }
         }
 
@@ -446,10 +627,18 @@ impl FillerBot {
     pub async fn process_pending_intents(&self) -> Result<()> {
         let (pending_intents, awaiting_lock_intents) = {
             let manager = self.intent_manager.lock().await;
-            let pending = manager.get_pending_intents().into_iter().cloned().collect::<Vec<_>>();
-            let awaiting_lock = manager.get_intents_by_status(IntentStatus::AwaitingSuccessfulLock).into_iter().cloned().collect::<Vec<_>>();
+            let pending = manager
+                .get_pending_intents()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            let awaiting_lock = manager
+                .get_intents_by_status(IntentStatus::AwaitingSuccessfulLock)
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>();
             drop(manager);
-            
+
             (pending, awaiting_lock)
         };
 
@@ -461,7 +650,10 @@ impl FillerBot {
             match self.intent_system.intent_locker(intent_id_bytes).await {
                 Ok(Some(locker)) => {
                     if locker == self.filler_address {
-                        info!("✅ Intent {} successfully locked by us, proceeding to fulfill", intent.intent_id);
+                        info!(
+                            "✅ Intent {} successfully locked by us, proceeding to fulfill",
+                            intent.intent_id
+                        );
 
                         // Update status to locked
                         let mut manager = self.intent_manager.lock().await;
@@ -473,7 +665,10 @@ impl FillerBot {
                             error!("Failed to fulfill intent {}: {}", intent.intent_id, e);
                         }
                     } else {
-                        info!("🔒 Intent {} locked by another filler: 0x{:x}", intent.intent_id, locker);
+                        info!(
+                            "🔒 Intent {} locked by another filler: 0x{:x}",
+                            intent.intent_id, locker
+                        );
 
                         // Update status to failed since we didn't get the lock
                         let mut manager = self.intent_manager.lock().await;
@@ -482,11 +677,17 @@ impl FillerBot {
                     }
                 }
                 Ok(None) => {
-                    info!("⏳ Intent {} still not locked, continuing to wait", intent.intent_id);
+                    info!(
+                        "⏳ Intent {} still not locked, continuing to wait",
+                        intent.intent_id
+                    );
                     // Keep waiting for lock confirmation
                 }
                 Err(e) => {
-                    error!("Failed to check intent locker for {}: {}", intent.intent_id, e);
+                    error!(
+                        "Failed to check intent locker for {}: {}",
+                        intent.intent_id, e
+                    );
                 }
             }
         }
@@ -507,14 +708,26 @@ impl FillerBot {
         for intent in pending_intents {
             info!("🔄 Processing pending intent: {}", intent.intent_id);
 
+            // Check if intent amount is above dust limit (546 sats)
+            const DUST_LIMIT: u64 = 546;
+            if intent.lane_btc_amount < DUST_LIMIT {
+                warn!(
+                    "❌ Intent {} amount {} sats is below dust limit ({} sats), skipping",
+                    intent.intent_id, intent.lane_btc_amount, DUST_LIMIT
+                );
+                continue;
+            }
+
             // Check if we can fulfill this intent
             let manager = self.intent_manager.lock().await;
             let can_fulfill = manager.can_fulfill_intent(&intent, available_btc);
             drop(manager);
 
             if !can_fulfill {
-                warn!("❌ Insufficient BTC to fulfill intent {} (need {} sats, have {} sats)",
-                      intent.intent_id, intent.lane_btc_amount, available_btc);
+                warn!(
+                    "❌ Insufficient BTC to fulfill intent {} (need {} sats, have {} sats)",
+                    intent.intent_id, intent.lane_btc_amount, available_btc
+                );
                 continue;
             }
 
@@ -524,29 +737,46 @@ impl FillerBot {
             match self.intent_system.intent_locker(intent_id_bytes).await {
                 Ok(Some(locker)) => {
                     if locker == self.filler_address {
-                        info!("🔒 Intent {} already locked by us, proceeding to fulfill", intent.intent_id);
+                        info!(
+                            "🔒 Intent {} already locked by us, proceeding to fulfill",
+                            intent.intent_id
+                        );
                         if let Err(e) = self.fulfill_intent(&intent).await {
                             error!("Failed to fulfill intent {}: {}", intent.intent_id, e);
                         }
                     } else {
-                        info!("🔒 Intent {} locked by another filler: 0x{:x}", intent.intent_id, locker);
+                        info!(
+                            "🔒 Intent {} locked by another filler: 0x{:x}",
+                            intent.intent_id, locker
+                        );
                     }
                 }
                 Ok(None) => {
-                    info!("🔓 Intent {} not locked, attempting to lock", intent.intent_id);
+                    info!(
+                        "🔓 Intent {} not locked, attempting to lock",
+                        intent.intent_id
+                    );
 
                     // Try to lock the intent using IntentSystem
-                    let tx_hash = self.intent_system.lock_intent_for_solving(intent_id_bytes, b"").await?;
+                    let tx_hash = self
+                        .intent_system
+                        .lock_intent_for_solving(intent_id_bytes, b"")
+                        .await?;
                     info!("🔒 lockIntentForSolving transaction sent: {}", tx_hash);
 
                     // Update status to awaiting successful lock
                     let mut manager = self.intent_manager.lock().await;
-                    manager.update_intent_status(&intent.intent_id, IntentStatus::AwaitingSuccessfulLock)?;
+                    manager.update_intent_status(
+                        &intent.intent_id,
+                        IntentStatus::AwaitingSuccessfulLock,
+                    )?;
                     drop(manager);
-
                 }
                 Err(e) => {
-                    error!("Failed to check intent locker for {}: {}", intent.intent_id, e);
+                    error!(
+                        "Failed to check intent locker for {}: {}",
+                        intent.intent_id, e
+                    );
                 }
             }
         }
@@ -555,16 +785,23 @@ impl FillerBot {
     }
 
     async fn fulfill_intent(&self, intent: &crate::intent_manager::UserIntent) -> Result<()> {
-        info!("💰 Fulfilling intent: {} ({} sats + {} fee -> {})",
-              intent.intent_id, intent.lane_btc_amount, intent.fee, intent.btc_destination);
+        info!(
+            "💰 Fulfilling intent: {} ({} sats + {} fee -> {})",
+            intent.intent_id, intent.lane_btc_amount, intent.fee, intent.btc_destination
+        );
 
         // Send BTC to the user's requested address
         // lane_btc_amount now contains the actual BTC amount from CBOR (not including fee)
-        let txid = self.bitcoin_client.lock().await.send_to_address(
-            &intent.btc_destination,
-            intent.lane_btc_amount.to::<u64>(),
-            &intent.intent_id,
-        ).await?;
+        let txid = self
+            .bitcoin_client
+            .lock()
+            .await
+            .send_to_address(
+                &intent.btc_destination,
+                intent.lane_btc_amount.to::<u64>(),
+                &intent.intent_id,
+            )
+            .await?;
 
         // Update the intent with the Bitcoin transaction ID
         let mut manager = self.intent_manager.lock().await;
@@ -573,7 +810,8 @@ impl FillerBot {
 
         // Start asynchronous confirmation monitoring
         let txid_parsed = bitcoin::Txid::from_str(&txid)?;
-        self.monitor_bitcoin_confirmation(&intent.intent_id, txid_parsed).await?;
+        self.monitor_bitcoin_confirmation(&intent.intent_id, txid_parsed)
+            .await?;
 
         info!("✅ Intent {} fulfilled successfully!", intent.intent_id);
 
@@ -581,7 +819,11 @@ impl FillerBot {
     }
 
     /// Asynchronously monitor Bitcoin transaction confirmations
-    async fn monitor_bitcoin_confirmation(&self, intent_id: &str, txid: bitcoin::Txid) -> Result<()> {
+    async fn monitor_bitcoin_confirmation(
+        &self,
+        intent_id: &str,
+        txid: bitcoin::Txid,
+    ) -> Result<()> {
         let bitcoin_client = self.bitcoin_client.clone();
         let intent_manager = self.intent_manager.clone();
         let intent_id = intent_id.to_string();
@@ -593,7 +835,12 @@ impl FillerBot {
 
             loop {
                 // Check current confirmation count
-                match bitcoin_client.lock().await.get_transaction_confirmations(&txid).await {
+                match bitcoin_client
+                    .lock()
+                    .await
+                    .get_transaction_confirmations(&txid)
+                    .await
+                {
                     Ok(current_confirmations) => {
                         if current_confirmations > confirmations {
                             confirmations = current_confirmations;
@@ -601,13 +848,20 @@ impl FillerBot {
                             // Update the intent manager with new confirmation count
                             {
                                 let mut manager = intent_manager.lock().await;
-                                if let Err(e) = manager.update_bitcoin_confirmations(&intent_id, confirmations) {
-                                    error!("Failed to update confirmations for intent {}: {}", intent_id, e);
+                                if let Err(e) =
+                                    manager.update_bitcoin_confirmations(&intent_id, confirmations)
+                                {
+                                    error!(
+                                        "Failed to update confirmations for intent {}: {}",
+                                        intent_id, e
+                                    );
                                 }
                             }
 
-                            info!("📈 Intent {} Bitcoin transaction {} now has {} confirmations",
-                                  intent_id, txid, confirmations);
+                            info!(
+                                "📈 Intent {} Bitcoin transaction {} now has {} confirmations",
+                                intent_id, txid, confirmations
+                            );
 
                             // If we have enough confirmations, we're done monitoring
                             if confirmations >= required_confirmations {
@@ -618,7 +872,10 @@ impl FillerBot {
                         }
                     }
                     Err(e) => {
-                        error!("Failed to check confirmations for intent {}: {}", intent_id, e);
+                        error!(
+                            "Failed to check confirmations for intent {}: {}",
+                            intent_id, e
+                        );
                     }
                 }
 
