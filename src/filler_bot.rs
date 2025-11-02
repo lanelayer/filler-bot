@@ -539,9 +539,22 @@ impl FillerBot {
             .ok_or_else(|| anyhow::anyhow!("No Bitcoin txid found for intent"))?;
 
         // Get the Bitcoin transaction info to find which block it's in
-        let bitcoin_client = self.bitcoin_client.lock().await;
+        let mut bitcoin_client = self.bitcoin_client.lock().await;
         let tx_info = bitcoin_client.get_transaction(bitcoin_txid).await?;
         drop(bitcoin_client);
+
+        // Check if transaction is confirmed
+        let confirmations = tx_info
+            .get("confirmations")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        if confirmations == 0 {
+            return Err(anyhow::anyhow!(
+                "Bitcoin transaction {} is unconfirmed (0 confirmations). Waiting for confirmation before solving.",
+                bitcoin_txid
+            ));
+        }
 
         // Extract the block number from the transaction info
         // Core Lane uses Bitcoin block numbers, not Core Lane block numbers
