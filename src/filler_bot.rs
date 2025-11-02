@@ -156,8 +156,24 @@ impl FillerBot {
     }
 
     async fn poll_cycle(&self, last_block_number: &mut u64) -> Result<()> {
-        // Get current block number
+        // Check if the Ethereum node is syncing
         let provider = self.get_provider();
+
+        match provider.syncing().await {
+            Ok(sync_status) => {
+                // SyncStatus is false when not syncing, or contains sync info when syncing
+                if !matches!(sync_status, alloy_rpc_types::SyncStatus::None) {
+                    warn!("⚠️  Ethereum node is still syncing, skipping poll cycle to avoid stale data");
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                warn!("Failed to check sync status: {}, proceeding cautiously", e);
+                // Continue anyway, but log the warning
+            }
+        }
+
+        // Get current block number
         let current_block = provider
             .get_block_number()
             .await
