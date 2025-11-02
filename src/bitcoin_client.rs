@@ -409,33 +409,42 @@ impl BitcoinClient {
     }
 
     /// Get transaction information
-    pub async fn get_transaction(&self, txid: &str) -> Result<serde_json::Value> {
+    pub async fn get_transaction(&mut self, txid: &str) -> Result<serde_json::Value> {
         let txid = Txid::from_str(txid).map_err(|e| anyhow::anyhow!("Invalid txid: {}", e))?;
 
         match &self.backend {
-            BitcoinBackend::Electrum { url } => {
-                let client = electrum_client::Client::new(url)
-                    .map_err(|e| anyhow::anyhow!("Failed to connect to Electrum: {}", e))?;
+            BitcoinBackend::Electrum { .. } => {
+                // Refresh wallet to get latest blockchain state
+                self.refresh_balance().await?;
 
-                // Convert to the Txid type expected by electrum-client
-                let electrum_txid_str = txid.to_string();
-                let electrum_txid = bitcoincore_rpc::bitcoin::Txid::from_str(&electrum_txid_str)
-                    .map_err(|e| anyhow::anyhow!("Failed to convert txid: {}", e))?;
+                // Get current tip height from the wallet's latest checkpoint
+                let tip_height = self.wallet.latest_checkpoint().height();
 
-                let _tx = client
-                    .transaction_get(&electrum_txid)
-                    .map_err(|e| anyhow::anyhow!("Failed to get transaction: {}", e))?;
+                // Get transaction details from the wallet
+                let (confirmations, block_height) =
+                    if let Some(tx_details) = self.wallet.get_tx(txid) {
+                        use bdk_wallet::chain::ChainPosition;
 
-                // For Electrum, we'll use a simplified confirmation count
-                // In a real implementation, you'd need to track confirmations differently
-                let confirmations = 0;
+                        match tx_details.chain_position {
+                            ChainPosition::Confirmed { anchor, .. } => {
+                                let confs = tip_height.saturating_sub(anchor.block_id.height) + 1;
+                                let height = anchor.block_id.height as u64;
+                                (confs, Some(height))
+                            }
+                            _ => (0, None), // Unconfirmed
+                        }
+                    } else {
+                        // Transaction not found in wallet
+                        (0, None)
+                    };
 
                 // Build JSON response compatible with Bitcoin Core RPC format
                 Ok(json!({
                     "txid": txid.to_string(),
                     "confirmations": confirmations,
-                    "time": 0, // Electrum doesn't provide this in the same way
-                    "blocktime": 0, // Electrum doesn't provide this in the same way
+                    "blockheight": block_height,
+                    "time": 0, // Electrum doesn't provide this easily
+                    "blocktime": 0, // Electrum doesn't provide this easily
                 }))
             }
             BitcoinBackend::Rpc {
@@ -479,7 +488,7 @@ impl BitcoinClient {
     }
 
     /// Wait for transaction confirmations
-    pub async fn wait_for_confirmation(&self, txid: &str, confirmations: u32) -> Result<()> {
+    pub async fn wait_for_confirmation(&mut self, txid: &str, confirmations: u32) -> Result<()> {
         info!(
             "⏳ Waiting for {} confirmations of transaction {}",
             confirmations, txid
@@ -585,24 +594,32 @@ impl BitcoinClient {
     }
 
     /// Get transaction confirmations
-    pub async fn get_transaction_confirmations(&self, txid: &bitcoin::Txid) -> Result<u32> {
+    pub async fn get_transaction_confirmations(&mut self, txid: &bitcoin::Txid) -> Result<u32> {
         match &self.backend {
-            BitcoinBackend::Electrum { url } => {
-                let client = electrum_client::Client::new(url)
-                    .map_err(|e| anyhow::anyhow!("Failed to connect to Electrum: {}", e))?;
+            BitcoinBackend::Electrum { .. } => {
+                // Refresh wallet to get latest blockchain state
+                self.refresh_balance().await?;
 
-                // Convert to the Txid type expected by electrum-client
-                let electrum_txid_str = txid.to_string();
-                let electrum_txid = bitcoincore_rpc::bitcoin::Txid::from_str(&electrum_txid_str)
-                    .map_err(|e| anyhow::anyhow!("Failed to convert txid: {}", e))?;
+                // Get current tip height from the wallet's latest checkpoint
+                let tip_height = self.wallet.latest_checkpoint().height();
 
-                match client.transaction_get(&electrum_txid) {
-                    Ok(_tx) => {
-                        // TODO: Implement proper Electrum confirmation counting
-                        // For now, return 0 (unconfirmed)
-                        Ok(0)
-                    }
-                    Err(_) => Ok(0), // Not found or unconfirmed
+                // Get transaction details from the wallet
+                if let Some(tx_details) = self.wallet.get_tx(*txid) {
+                    use bdk_wallet::chain::ChainPosition;
+
+                    // Calculate confirmations based on chain position
+                    let confs = match tx_details.chain_position {
+                        ChainPosition::Confirmed { anchor, .. } => {
+                            // anchor is ConfirmationBlockTime which has block_id.height
+                            tip_height.saturating_sub(anchor.block_id.height) + 1
+                        }
+                        _ => 0, // Unconfirmed or Unreachable
+                    };
+
+                    Ok(confs)
+                } else {
+                    // Transaction not found in wallet
+                    Ok(0)
                 }
             }
             BitcoinBackend::Rpc {
