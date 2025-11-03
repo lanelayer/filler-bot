@@ -304,6 +304,23 @@ impl FillerBot {
             .map_err(|e| anyhow!("Failed to get transaction: {}", e))?
             .ok_or_else(|| anyhow!("Transaction {} not found", tx_hash))?;
 
+        // Get transaction receipt to verify it succeeded
+        let receipt = provider
+            .get_transaction_receipt(hash)
+            .await
+            .map_err(|e| anyhow!("Failed to get transaction receipt: {}", e))?;
+
+        // Check if receipt exists and transaction was successful
+        if let Some(receipt) = receipt {
+            if !receipt.status() {
+                debug!("⚠️  Transaction {} failed (status = 0), skipping", tx_hash);
+                return Ok(());
+            }
+        } else {
+            debug!("⚠️  No receipt found for transaction {}, skipping", tx_hash);
+            return Ok(());
+        }
+
         // Check if this transaction is to the exit marketplace
         let tx_envelope = tx.inner.inner();
         if let Some(to_addr) = crate::intent_contract::get_transaction_to(&tx_envelope) {
@@ -536,6 +553,42 @@ impl FillerBot {
         for intent in fulfilled_intents {
             info!("🔄 Processing fulfilled intent: {}", intent.intent_id);
 
+            // First check if the intent is already solved (prevents duplicate solve transactions)
+            let intent_id_bytes = match B256::from_str(&intent.intent_id) {
+                Ok(id) => id,
+                Err(e) => {
+                    error!("Failed to parse intent ID {}: {}", intent.intent_id, e);
+                    continue;
+                }
+            };
+
+            match self.intent_system.is_intent_solved(intent_id_bytes).await {
+                Ok(true) => {
+                    info!(
+                        "✅ Intent {} is already solved, marking as solved and removing",
+                        intent.intent_id
+                    );
+                    let mut manager = self.intent_manager.lock().await;
+                    if let Err(e) =
+                        manager.update_intent_status(&intent.intent_id, IntentStatus::Solved)
+                    {
+                        error!("Failed to update intent status: {}", e);
+                    }
+                    manager.remove_intent(&intent.intent_id);
+                    continue;
+                }
+                Ok(false) => {
+                    // Not solved yet, proceed to solve
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to check if intent {} is solved: {}, proceeding to solve anyway",
+                        intent.intent_id, e
+                    );
+                    // Continue to try solving anyway
+                }
+            }
+
             // Try to solve the intent on Core Lane
             if let Err(e) = self.solve_intent(&intent).await {
                 error!("Failed to solve intent {}: {}", intent.intent_id, e);
@@ -549,6 +602,7 @@ impl FillerBot {
         info!("🔓 Solving intent: {}", intent.intent_id);
 
         // Get the Bitcoin txid from the intent
+        let intent_id_bytes = B256::from_str(&intent.intent_id)?;
         let bitcoin_txid = intent
             .bitcoin_txid
             .as_ref()
@@ -613,7 +667,6 @@ impl FillerBot {
         );
 
         // Call solveIntent on the Core Lane contract using IntentSystem
-        let intent_id_bytes = B256::from_str(&intent.intent_id)?;
         let tx_hash = self
             .intent_system
             .solve_intent(intent_id_bytes, &solve_data)
@@ -676,6 +729,35 @@ impl FillerBot {
             info!("⏳ Checking lock status for intent: {}", intent.intent_id);
 
             let intent_id_bytes = B256::from_str(&intent.intent_id)?;
+
+            // First check if the intent is already solved (prevents unnecessary processing)
+            match self.intent_system.is_intent_solved(intent_id_bytes).await {
+                Ok(true) => {
+                    info!(
+                        "✅ Intent {} is already solved, marking as solved and removing",
+                        intent.intent_id
+                    );
+                    let mut manager = self.intent_manager.lock().await;
+                    if let Err(e) =
+                        manager.update_intent_status(&intent.intent_id, IntentStatus::Solved)
+                    {
+                        error!("Failed to update intent status: {}", e);
+                    }
+                    manager.remove_intent(&intent.intent_id);
+                    continue;
+                }
+                Ok(false) => {
+                    // Not solved yet, proceed to check lock status
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to check if intent {} is solved: {}, proceeding anyway",
+                        intent.intent_id, e
+                    );
+                    // Continue anyway
+                }
+            }
+
             match self.intent_system.intent_locker(intent_id_bytes).await {
                 Ok(Some(locker)) => {
                     if locker == self.filler_address {
@@ -741,9 +823,15 @@ impl FillerBot {
             const DUST_LIMIT: u64 = 546;
             if intent.lane_btc_amount < DUST_LIMIT {
                 warn!(
-                    "❌ Intent {} amount {} sats is below dust limit ({} sats), skipping",
+                    "❌ Intent {} amount {} sats is below dust limit ({} sats), removing from pending",
                     intent.intent_id, intent.lane_btc_amount, DUST_LIMIT
                 );
+                let mut manager = self.intent_manager.lock().await;
+                if let Err(e) = manager.update_intent_status(&intent.intent_id, IntentStatus::Failed) {
+                    error!("Failed to update intent status: {}", e);
+                }
+                manager.remove_intent(&intent.intent_id);
+                drop(manager);
                 continue;
             }
 
@@ -762,6 +850,34 @@ impl FillerBot {
 
             // Check if the intent is already locked using IntentSystem
             let intent_id_bytes = B256::from_str(&intent.intent_id)?;
+
+            // First check if the intent is already solved (prevents wasting gas on lock attempts)
+            match self.intent_system.is_intent_solved(intent_id_bytes).await {
+                Ok(true) => {
+                    info!(
+                        "✅ Intent {} is already solved, marking as solved and removing",
+                        intent.intent_id
+                    );
+                    let mut manager = self.intent_manager.lock().await;
+                    if let Err(e) =
+                        manager.update_intent_status(&intent.intent_id, IntentStatus::Solved)
+                    {
+                        error!("Failed to update intent status: {}", e);
+                    }
+                    manager.remove_intent(&intent.intent_id);
+                    continue;
+                }
+                Ok(false) => {
+                    // Not solved yet, proceed to check lock status
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to check if intent {} is solved: {}, proceeding anyway",
+                        intent.intent_id, e
+                    );
+                    // Continue anyway
+                }
+            }
 
             match self.intent_system.intent_locker(intent_id_bytes).await {
                 Ok(Some(locker)) => {
