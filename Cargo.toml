@@ -78,3 +78,14 @@ sha3 = "0.10"
 bdk_wallet = { version = "2.2.0", features = ["keys-bip39", "rusqlite"] }
 bdk_bitcoind_rpc = "0.22.0"
 bdk_electrum = { version = "0.23.0", features = ["use-openssl"] }
+
+# Web framework for solver backend
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors"] }
+
+# Secp256k1 with MuSig2 support (from git until musig is in stable release)
+secp256k1 = { git = "https://github.com/rust-bitcoin/rust-secp256k1", features = ["rand", "std", "global-context"] }
+rand = "0.8"
+
+# WASM helper library for taproot/musig utilities
+wasm-helper = { path = "../.." }

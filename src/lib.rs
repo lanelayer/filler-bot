@@ -5,6 +5,7 @@ pub mod intent_contract;
 pub mod intent_manager;
 pub mod intent_system;
 pub mod intent_types;
+pub mod solver_http;
 pub mod test_simulator;
 
 // pub use core_lane_client::CoreLaneClient; // Removed - using Alloy directly now
@@ -20,4 +21,5 @@ pub use intent_manager::{
 pub use intent_types::{
     create_anchor_bitcoin_fill_intent, AnchorBitcoinFill, IntentData, IntentType,
 };
+pub use solver_http::{serve as serve_solver_http, SolverState};
 pub use test_simulator::SimulatorTester;

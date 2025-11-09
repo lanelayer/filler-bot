@@ -85,6 +85,10 @@ impl FillerBot {
     }
 
     pub async fn start(&self) -> Result<()> {
+        self.start_with_http_port(3000).await
+    }
+
+    pub async fn start_with_http_port(&self, http_port: u16) -> Result<()> {
         info!("🚀 Starting LaneLayer Filler Bot");
         info!("📡 Exit marketplace: 0x{:x}", self.exit_marketplace);
         info!("🤖 Filler address: 0x{:x}", self.filler_address);
@@ -93,10 +97,24 @@ impl FillerBot {
         // Test connections
         self.test_connections().await?;
 
+        // Start HTTP API server in background
+        info!("🌐 Starting solver HTTP API on port {}", http_port);
+        let http_handle = tokio::spawn(async move {
+            if let Err(e) = crate::solver_http::serve(http_port).await {
+                error!("HTTP server error: {}", e);
+            }
+        });
+
         // Main polling loop
         let mut last_block_number = 0u64;
 
         loop {
+            // Check if HTTP server is still running
+            if http_handle.is_finished() {
+                error!("❌ HTTP server stopped unexpectedly");
+                return Err(anyhow!("HTTP server stopped"));
+            }
+
             match self.poll_cycle(&mut last_block_number).await {
                 Ok(_) => {
                     debug!("Poll cycle completed successfully");
