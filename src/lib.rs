@@ -5,6 +5,7 @@ pub mod intent_contract;
 pub mod intent_manager;
 pub mod intent_system;
 pub mod intent_types;
+pub mod musig_utils;
 pub mod solver_http;
 pub mod test_simulator;
 

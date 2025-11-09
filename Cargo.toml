@@ -86,6 +86,3 @@ tower-http = { version = "0.5", features = ["cors"] }
 # Secp256k1 with MuSig2 support (from git until musig is in stable release)
 secp256k1 = { git = "https://github.com/rust-bitcoin/rust-secp256k1", features = ["rand", "std", "global-context"] }
 rand = "0.8"
-
-# WASM helper library for taproot/musig utilities
-wasm-helper = { path = "../.." }

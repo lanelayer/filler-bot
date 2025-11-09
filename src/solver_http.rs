@@ -23,6 +23,8 @@ use secp256k1::musig::{
 };
 use bitcoin::hashes::Hash;
 
+use crate::musig_utils;
+
 type SessionId = String;
 
 // ============================================================================
@@ -210,13 +212,13 @@ async fn init_escrow(
     info!("   Generated solver keypair");
     info!("   Solver pubkey: {}", hex::encode(solver_pk.serialize()));
 
-    let key_agg_cache = wasm_helper::aggregate_pubkeys(&[user_pk, solver_pk]);
+    let key_agg_cache = musig_utils::aggregate_pubkeys(&[user_pk, solver_pk]);
     let agg_x = key_agg_cache.agg_pk();
 
     let (user_xonly, _) = user_pk.x_only_public_key();
-    let refund_script = wasm_helper::refund_leaf_script(user_xonly, 144);
+    let refund_script = musig_utils::refund_leaf_script(user_xonly, 144);
 
-    let tr = wasm_helper::build_tr_with_refund_leaf(
+    let tr = musig_utils::build_tr_with_refund_leaf(
         &state.secp,
         agg_x,
         refund_script,
@@ -641,7 +643,7 @@ async fn build_burn_tx(
     payload.extend_from_slice(&req.chain_id.to_be_bytes());
     payload.extend_from_slice(&intent_hash_bytes);
 
-    let psbt = wasm_helper::build_burn_psbt(
+    let psbt = musig_utils::build_burn_psbt(
         outpoint,
         funding_value,
         burn_amount,
@@ -658,7 +660,7 @@ async fn build_burn_tx(
         script_pubkey: bitcoin::ScriptBuf::new(),
     };
 
-    let sighash = wasm_helper::keyspend_sighash(
+    let sighash = musig_utils::keyspend_sighash(
         &psbt,
         &prevout,
         bitcoin::sighash::TapSighashType::AllPlusAnyoneCanPay,
@@ -714,7 +716,7 @@ async fn build_payout_tx(
         .map_err(|_| StatusCode::BAD_REQUEST)?
         .assume_checked();
 
-    let psbt = wasm_helper::build_payout_psbt(
+    let psbt = musig_utils::build_payout_psbt(
         outpoint,
         funding_value,
         payout_address.script_pubkey(),
@@ -731,7 +733,7 @@ async fn build_payout_tx(
     };
 
     let sighash =
-        wasm_helper::keyspend_sighash(&psbt, &prevout, bitcoin::sighash::TapSighashType::Default)
+        musig_utils::keyspend_sighash(&psbt, &prevout, bitcoin::sighash::TapSighashType::Default)
             .map_err(|e| {
                 error!("Error computing sighash: {}", e);
                 StatusCode::INTERNAL_SERVER_ERROR
