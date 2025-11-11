@@ -22,5 +22,5 @@ pub use intent_manager::{
 pub use intent_types::{
     create_anchor_bitcoin_fill_intent, AnchorBitcoinFill, IntentData, IntentType,
 };
-pub use solver_http::{serve as serve_solver_http, SolverState};
+pub use solver_http::{serve as serve_solver_http, serve_with_signer as serve_solver_http_with_signer, SolverState};
 pub use test_simulator::SimulatorTester;

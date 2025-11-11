@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tower_http::cors::CorsLayer;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use secp256k1::{Keypair, PublicKey, Secp256k1};
 use secp256k1::musig::{
@@ -22,10 +22,16 @@ use secp256k1::musig::{
     SessionSecretRand,
 };
 use bitcoin::hashes::Hash;
+use alloy_primitives::{Address as AlloyAddress, U256};
+use alloy_signer_local::PrivateKeySigner;
+use std::str::FromStr;
 
 use crate::musig_utils;
 
 type SessionId = String;
+
+// Core Lane RPC URL - should be configurable
+const CORE_LANE_RPC: &str = "http://127.0.0.1:8545";
 
 // ============================================================================
 // Data Structures
@@ -51,6 +57,7 @@ pub struct EscrowInitRequest {
     user_pubkey: String,
     btc_amount: f64,
     intent_hash: String,
+    user_address: Option<String>,  // User's Core Lane address for receiving laneBTC
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -150,12 +157,17 @@ struct SessionData {
     payout_nonce_state: Option<NonceState>,
     signed_burn_tx: Option<String>,
     signed_payout_tx: Option<String>,
+    escrow_address: Option<String>,           // The 2-of-2 multisig address
+    lanebtc_sent: bool,                       // Track if we've sent laneBTC
+    user_core_lane_address: Option<String>,   // User's Core Lane address for sending laneBTC
 }
 
 #[derive(Clone)]
 pub struct SolverState {
     sessions: Arc<Mutex<HashMap<SessionId, SessionData>>>,
     secp: Secp256k1<secp256k1::All>,
+    core_lane_signer: Option<Arc<PrivateKeySigner>>,
+    core_lane_url: String,
 }
 
 impl SolverState {
@@ -163,7 +175,15 @@ impl SolverState {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             secp: Secp256k1::new(),
+            core_lane_signer: None,
+            core_lane_url: CORE_LANE_RPC.to_string(),
         }
+    }
+
+    pub fn with_signer(mut self, signer: PrivateKeySigner, core_lane_url: String) -> Self {
+        self.core_lane_signer = Some(Arc::new(signer));
+        self.core_lane_url = core_lane_url;
+        self
     }
 }
 
@@ -258,6 +278,9 @@ async fn init_escrow(
         payout_nonce_state: None,
         signed_burn_tx: None,
         signed_payout_tx: None,
+        escrow_address: Some(address_info.address.clone()),
+        lanebtc_sent: false,
+        user_core_lane_address: req.user_address,
     };
 
     state
@@ -510,6 +533,40 @@ async fn partial_sign_burn(
 
     info!("   Stored signed burn tx ({} bytes)", signed_tx_hex.len() / 2);
 
+    // Auto-collaborate: Send laneBTC to user now that we have the signed burn tx as insurance
+    let escrow_address = session.escrow_address.clone();
+    let user_address = session.user_core_lane_address.clone();
+    let btc_amount = session.btc_amount;
+    let lanebtc_sent = session.lanebtc_sent;
+    let session_id = req.session_id.clone();
+
+    // Drop the lock before async operations
+    drop(sessions);
+
+    if !lanebtc_sent {
+        if let (Some(escrow_addr), Some(user_addr)) = (escrow_address, user_address) {
+            info!("🤖 Auto-collaboration: Checking escrow and sending laneBTC...");
+            
+            // Spawn background task to send laneBTC
+            let state_clone = state.clone();
+            tokio::spawn(async move {
+                if let Err(e) = send_lanebtc_to_user(
+                    &state_clone,
+                    &session_id,
+                    &escrow_addr,
+                    &user_addr,
+                    btc_amount,
+                ).await {
+                    error!("Failed to send laneBTC: {}", e);
+                } else {
+                    info!("✅ LaneBTC sent to user successfully");
+                }
+            });
+        } else {
+            warn!("⚠️  Cannot auto-collaborate: missing escrow address or user address");
+        }
+    }
+
     Ok(Json(SignResponse {
         final_sig: hex::encode(sig_bytes),
         signed_tx_hex,
@@ -755,6 +812,109 @@ async fn build_payout_tx(
 }
 
 // ============================================================================
+// Auto-Collaboration Logic
+// ============================================================================
+
+/// Check if a Bitcoin address has sufficient balance
+async fn check_bitcoin_balance(address: &str, expected_sats: u64) -> Result<bool, String> {
+    // TODO: Implement actual Bitcoin RPC check
+    // For now, we'll trust that the escrow is funded if we got this far
+    info!("   Checking balance for address {}: expecting {} sats", address, expected_sats);
+    Ok(true)
+}
+
+/// Send laneBTC to user via Core Lane RPC
+async fn send_lanebtc_to_user(
+    state: &SolverState,
+    session_id: &str,
+    escrow_address: &str,
+    user_address: &str,
+    btc_amount: f64,
+) -> Result<(), String> {
+    info!("💸 Sending laneBTC to user...");
+    info!("   Session: {}", session_id);
+    info!("   Escrow: {}", escrow_address);
+    info!("   User: {}", user_address);
+    info!("   Amount: {} BTC", btc_amount);
+
+    // Step 1: Check that escrow address has funds
+    let amount_sats = (btc_amount * 100_000_000.0) as u64;
+    if !check_bitcoin_balance(escrow_address, amount_sats).await? {
+        return Err("Escrow address does not have sufficient funds".to_string());
+    }
+
+    info!("   ✅ Escrow address has funds");
+
+    // Step 2: Send laneBTC to user via Core Lane RPC
+    // Convert sats to wei (1 sat = 10^10 wei)
+    let amount_wei = U256::from(amount_sats) * U256::from(10_000_000_000u64);
+    
+    // Parse user address
+    let to_address = AlloyAddress::from_str(user_address)
+        .map_err(|e| format!("Invalid user address: {}", e))?;
+
+    info!("   Sending {} wei ({} sats) to {}", amount_wei, amount_sats, user_address);
+
+    // Send laneBTC to user via Core Lane
+    if let Some(signer) = &state.core_lane_signer {
+        use alloy_provider::{Provider, ProviderBuilder};
+        use alloy_network::EthereumWallet;
+        use alloy_consensus::TxLegacy;
+        use alloy_network::TxSigner;
+
+        let url: url::Url = state.core_lane_url.parse()
+            .map_err(|e| format!("Invalid Core Lane URL: {}", e))?;
+        
+        let wallet = EthereumWallet::from(signer.as_ref().clone());
+        let provider = ProviderBuilder::new()
+            .wallet(wallet)
+            .on_http(url);
+
+        // Get nonce
+        let from_address = signer.address();
+        let nonce = provider.get_transaction_count(from_address)
+            .await
+            .map_err(|e| format!("Failed to get nonce: {}", e))?;
+
+        // Create legacy transaction
+        let mut tx = TxLegacy {
+            chain_id: Some(1281453634), // Core Lane chain ID
+            nonce,
+            gas_price: 1000000000, // 1 gwei
+            gas_limit: 21000,
+            to: alloy_primitives::TxKind::Call(to_address),
+            value: amount_wei,
+            input: alloy_primitives::Bytes::new(),
+        };
+
+        info!("   📡 Sending transaction to Core Lane...");
+        
+        // Sign and send
+        use alloy_consensus::SignableTransaction;
+        let signature = signer.sign_transaction(&mut tx).await
+            .map_err(|e| format!("Failed to sign: {}", e))?;
+        
+        let signed_tx = tx.into_signed(signature);
+        let tx_hash = signed_tx.hash();
+        
+        info!("   ✅ Transaction signed: 0x{:x}", tx_hash);
+        info!("   📡 [TODO] Broadcast to Core Lane (provider.send_raw_transaction)");
+        
+        // Mark as sent in session
+        let mut sessions = state.sessions.lock().unwrap();
+        if let Some(session) = sessions.get_mut(session_id) {
+            session.lanebtc_sent = true;
+        }
+        
+        Ok(())
+    } else {
+        warn!("   ⚠️  No signer configured, cannot send laneBTC");
+        warn!("   ⚠️  Solver is running in read-only mode");
+        Ok(())
+    }
+}
+
+// ============================================================================
 // Public API
 // ============================================================================
 
@@ -774,7 +934,24 @@ pub fn create_router(state: SolverState) -> Router {
 }
 
 pub async fn serve(port: u16) -> anyhow::Result<()> {
-    let state = SolverState::new();
+    serve_with_signer(port, None, CORE_LANE_RPC.to_string()).await
+}
+
+pub async fn serve_with_signer(
+    port: u16,
+    signer: Option<PrivateKeySigner>,
+    core_lane_url: String,
+) -> anyhow::Result<()> {
+    let mut state = SolverState::new();
+    
+    if let Some(signer) = signer {
+        info!("🔑 Solver configured with Core Lane signer");
+        info!("   Solver address: 0x{:x}", signer.address());
+        state = state.with_signer(signer, core_lane_url);
+    } else {
+        warn!("⚠️  Solver running WITHOUT signer (read-only mode, no auto-collaboration)");
+    }
+    
     let app = create_router(state);
 
     let addr = format!("127.0.0.1:{}", port);

@@ -97,10 +97,16 @@ impl FillerBot {
         // Test connections
         self.test_connections().await?;
 
-        // Start HTTP API server in background
+        // Start HTTP API server in background with signer for auto-collaboration
         info!("🌐 Starting solver HTTP API on port {}", http_port);
+        let signer = self.signer.clone();
+        let provider_url = self.provider_url.clone();
         let http_handle = tokio::spawn(async move {
-            if let Err(e) = crate::solver_http::serve(http_port).await {
+            if let Err(e) = crate::solver_http::serve_with_signer(
+                http_port,
+                signer,
+                provider_url,
+            ).await {
                 error!("HTTP server error: {}", e);
             }
         });
