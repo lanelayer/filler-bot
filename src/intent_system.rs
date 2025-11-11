@@ -1,3 +1,4 @@
+use crate::intent_contract::calculate_intent_id;
 use alloy_consensus;
 use alloy_network::{Ethereum, TxSigner};
 use alloy_primitives::{Address, Bytes, B256, U256};
@@ -6,6 +7,9 @@ use alloy_rlp;
 use alloy_rpc_types::TransactionRequest;
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::{anyhow, Result};
+use ciborium::from_reader;
+use hex;
+use std::io::Cursor;
 use std::str::FromStr;
 
 /// IntentSystem interface for Core Lane
@@ -33,6 +37,15 @@ pub trait IntentSystem {
         blob_hash: B256,
         nonce: u64,
         extra_data: &[u8],
+    ) -> Result<B256>;
+
+    /// Create an intent and lock it using EIP-712 signature
+    /// signer_address: The address that signed the EIP-712 message (used to calculate intent ID)
+    async fn create_intent_and_lock(
+        &self,
+        eip712sig: &[u8],
+        lock_data: &[u8],
+        signer_address: Address,
     ) -> Result<B256>;
 
     // Intent management functions
@@ -65,6 +78,13 @@ pub struct CoreLaneIntentSystem {
     contract_address: Address,
     intent_contract: crate::intent_contract::IntentContract,
     signer: Option<PrivateKeySigner>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct LockData {
+    pub intent: Vec<u8>,
+    pub nonce: U256,
+    pub value: U256,
 }
 
 impl CoreLaneIntentSystem {
@@ -396,5 +416,34 @@ impl IntentSystem for CoreLaneIntentSystem {
             .map_err(|e| anyhow!("Failed to call contract: {}", e))?;
         self.intent_contract
             .parse_value_stored_in_intent_response(&format!("0x{}", hex::encode(result.as_ref())))
+    }
+
+    async fn create_intent_and_lock(
+        &self,
+        eip712sig: &[u8],
+        lock_data: &[u8],
+        signer_address: Address,
+    ) -> Result<B256> {
+        let lock: LockData = from_reader(Cursor::new(lock_data))
+            .map_err(|e| anyhow!("Failed to parse lock data: {}", e))?;
+
+        let nonce = lock.nonce.to::<u64>();
+
+        let intent_id =
+            calculate_intent_id(signer_address, nonce, Bytes::from(lock.intent.clone()));
+
+        let call_data = self
+            .intent_contract
+            .encode_create_intent_and_lock_call(eip712sig, lock_data);
+
+        let call_data_bytes = hex::decode(call_data.trim_start_matches("0x"))?;
+        let signer = self.signer.as_ref().ok_or_else(|| {
+            anyhow!("No signer configured. Use new_with_signer() to enable transaction sending.")
+        })?;
+
+        self.send_transaction(signer, call_data_bytes, U256::ZERO)
+            .await?;
+
+        Ok(intent_id)
     }
 }

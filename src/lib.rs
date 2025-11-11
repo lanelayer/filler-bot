@@ -1,6 +1,8 @@
 // pub mod core_lane_client; // Removed - using Alloy directly now
 pub mod bitcoin_client;
+pub mod eip712;
 pub mod filler_bot;
+pub mod http_server;
 pub mod intent_contract;
 pub mod intent_manager;
 pub mod intent_system;

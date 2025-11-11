@@ -19,6 +19,7 @@ sol! {
         function isIntentSolved(bytes32 intentId) view returns (bool);
         function intentLocker(bytes32 intentId) view returns (address);
         function valueStoredInIntent(bytes32 intentId) view returns (uint256);
+        function createIntentAndLock(bytes eip712sig, bytes lockData) returns (bytes32 intentId);
     }
 }
 
@@ -67,6 +68,10 @@ pub enum IntentCall {
     },
     ValueStoredInIntent {
         intent_id: B256,
+    },
+    CreateIntentAndLock {
+        eip712sig: Vec<u8>,
+        lock_data: Vec<u8>,
     },
 }
 
@@ -244,6 +249,15 @@ pub fn decode_intent_calldata(calldata: &[u8]) -> Option<IntentCall> {
             };
             Some(IntentCall::ValueStoredInIntent {
                 intent_id: B256::from_slice(call.intentId.as_slice()),
+            })
+        }
+        IntentSystem::createIntentAndLockCall::SELECTOR => {
+            let Ok(call) = IntentSystem::createIntentAndLockCall::abi_decode(calldata) else {
+                return None;
+            };
+            Some(IntentCall::CreateIntentAndLock {
+                eip712sig: call.eip712sig.to_vec(),
+                lock_data: call.lockData.to_vec(),
             })
         }
         _ => None,
@@ -577,6 +591,15 @@ impl IntentContract {
     pub fn encode_blob_stored_call(&self, blob_hash: B256) -> String {
         let call = IntentSystem::blobStoredCall {
             blobHash: blob_hash.into(),
+        };
+        format!("0x{}", hex::encode(call.abi_encode()))
+    }
+
+    /// Encode function call for createIntentAndLock(eip712sig, lockData)
+    pub fn encode_create_intent_and_lock_call(&self, eip712sig: &[u8], lock_data: &[u8]) -> String {
+        let call = IntentSystem::createIntentAndLockCall {
+            eip712sig: Bytes::from(eip712sig.to_vec()),
+            lockData: Bytes::from(lock_data.to_vec()),
         };
         format!("0x{}", hex::encode(call.abi_encode()))
     }
