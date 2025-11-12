@@ -2,11 +2,12 @@
 pub mod bitcoin_client;
 pub mod eip712;
 pub mod filler_bot;
-pub mod http_server;
 pub mod intent_contract;
 pub mod intent_manager;
 pub mod intent_system;
 pub mod intent_types;
+pub mod musig_utils;
+pub mod solver_http;
 pub mod test_simulator;
 
 // pub use core_lane_client::CoreLaneClient; // Removed - using Alloy directly now
@@ -22,4 +23,5 @@ pub use intent_manager::{
 pub use intent_types::{
     create_anchor_bitcoin_fill_intent, AnchorBitcoinFill, IntentData, IntentType,
 };
+pub use solver_http::{serve as serve_solver_http, SolverState};
 pub use test_simulator::SimulatorTester;

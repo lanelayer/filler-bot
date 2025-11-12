@@ -74,10 +74,10 @@ pub trait IntentSystem {
 
 /// IntentSystem implementation using Core Lane RPC
 pub struct CoreLaneIntentSystem {
-    provider_url: String,
+    pub provider_url: String,
     contract_address: Address,
     intent_contract: crate::intent_contract::IntentContract,
-    signer: Option<PrivateKeySigner>,
+    pub signer: Option<PrivateKeySigner>,
 }
 
 #[derive(serde::Deserialize)]

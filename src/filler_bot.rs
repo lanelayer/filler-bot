@@ -19,8 +19,7 @@ use crate::intent_system::{CoreLaneIntentSystem, IntentSystem, LockData};
 use crate::intent_types::{IntentData as CborIntentData, IntentType};
 use ciborium::from_reader;
 
-use crate::http_server::{create_router, HttpServerState};
-use std::net::SocketAddr;
+use crate::solver_http::serve;
 
 pub struct FillerBot {
     provider_url: String,
@@ -91,6 +90,10 @@ impl FillerBot {
     }
 
     pub async fn start(&self) -> Result<()> {
+        self.start_with_http_port(3000).await
+    }
+
+    pub async fn start_with_http_port(&self, http_port: u16) -> Result<()> {
         info!("🚀 Starting LaneLayer Filler Bot");
         info!("📡 Exit marketplace: 0x{:x}", self.exit_marketplace);
         info!("🤖 Filler address: 0x{:x}", self.filler_address);
@@ -99,61 +102,31 @@ impl FillerBot {
         // Test connections
         self.test_connections().await?;
 
-        // Main polling loop
-        let mut last_block_number = 0u64;
-
-        loop {
-            match self.poll_cycle(&mut last_block_number).await {
-                Ok(_) => {
-                    debug!("Poll cycle completed successfully");
-                }
-                Err(e) => {
-                    error!("Poll cycle failed: {}", e);
-                }
-            }
-
-            sleep(Duration::from_secs(self.poll_interval)).await;
-        }
-    }
-
-    pub async fn start_with_http_server(&self, http_port: u16) -> Result<()> {
-        info!("🚀 Starting LaneLayer Filler Bot with HTTP server");
-        info!("📡 Exit marketplace: 0x{:x}", self.exit_marketplace);
-        info!("🤖 Filler address: 0x{:x}", self.filler_address);
-        info!("⏰ Polling interval: {} seconds", self.poll_interval);
-        info!("🌐 HTTP server listening on port {}", http_port);
-
-        // Test connections
-        self.test_connections().await?;
-
-        let provider_url = self.provider_url.clone();
-        let exit_marketplace = self.exit_marketplace;
+        // Start HTTP API server in background with signer for auto-collaboration
+        info!("🌐 Starting solver HTTP API on port {}", http_port);
         let signer = self.signer.clone();
+        let provider_url = self.provider_url.clone();
         let intent_system = Arc::new(CoreLaneIntentSystem::new(
             provider_url,
-            exit_marketplace,
+            self.exit_marketplace,
             signer,
         ));
-        let http_state = HttpServerState { intent_system };
-
-        let router = create_router(http_state);
-
-        let addr = SocketAddr::from(([0, 0, 0, 0], http_port));
-        let listener = tokio::net::TcpListener::bind(&addr)
-            .await
-            .map_err(|e| anyhow!("Failed to bind to {}: {}", addr, e))?;
-
-        info!("✅ HTTP server started on http://{}", addr);
-
-        tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, router).await {
+        let http_handle = tokio::spawn(async move {
+            if let Err(e) = crate::solver_http::serve(http_port, intent_system).await {
                 error!("HTTP server error: {}", e);
             }
         });
 
+        // Main polling loop
         let mut last_block_number = 0u64;
 
         loop {
+            // Check if HTTP server is still running
+            if http_handle.is_finished() {
+                error!("❌ HTTP server stopped unexpectedly");
+                return Err(anyhow!("HTTP server stopped"));
+            }
+
             match self.poll_cycle(&mut last_block_number).await {
                 Ok(_) => {
                     debug!("Poll cycle completed successfully");

@@ -233,7 +233,7 @@ async fn main() -> Result<()> {
                 *poll_interval,
             )?;
 
-            bot.start_with_http_server(*http_port).await?;
+            bot.start_with_http_port(*http_port).await?;
         }
 
         Commands::TestCoreLane { core_lane_url } => {
