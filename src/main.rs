@@ -5,7 +5,6 @@ use tokio::sync::Mutex;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use alloy_signer_local::PrivateKeySigner;
 use lanelayer_filler_bot::{BitcoinClient, FillerBot, IntentManager, SimulatorTester};
 
 #[derive(Parser)]
@@ -76,6 +75,10 @@ enum Commands {
         /// Polling interval in seconds
         #[arg(long, default_value = "10")]
         poll_interval: u64,
+
+        /// HTTP server port for accepting intent submissions
+        #[arg(long, default_value = "8787")]
+        http_port: u16,
     },
 
     /// Check Core Lane connection
@@ -166,6 +169,7 @@ async fn main() -> Result<()> {
             bitcoin_wallet,
             exit_marketplace,
             poll_interval,
+            http_port,
         } => {
             // Resolve mnemonic from various sources
             let mnemonic_str =
@@ -229,11 +233,10 @@ async fn main() -> Result<()> {
                 *poll_interval,
             )?;
 
-            bot.start().await?;
+            bot.start_with_http_port(*http_port).await?;
         }
 
         Commands::TestCoreLane { core_lane_url } => {
-            use alloy_network::Ethereum;
             use alloy_provider::{Provider, ProviderBuilder};
             let url: url::Url = core_lane_url
                 .parse()

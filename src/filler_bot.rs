@@ -1,9 +1,10 @@
-use alloy_network::{Ethereum, TxSigner};
+use alloy_network::Ethereum;
 use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types::BlockId;
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::{anyhow, Result};
+use std::io::Cursor;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -11,10 +12,14 @@ use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info, warn};
 
 use crate::bitcoin_client::BitcoinClient;
+use crate::eip712::{verify_eip712_signature, Eip712Domain};
 use crate::intent_contract::{decode_intent_calldata, IntentCall, IntentContract};
 use crate::intent_manager::{IntentData, IntentManager, IntentStatus};
-use crate::intent_system::{CoreLaneIntentSystem, IntentSystem};
+use crate::intent_system::{CoreLaneIntentSystem, IntentSystem, LockData};
 use crate::intent_types::{IntentData as CborIntentData, IntentType};
+use ciborium::from_reader;
+
+use crate::solver_http::serve;
 
 pub struct FillerBot {
     provider_url: String,
@@ -85,6 +90,10 @@ impl FillerBot {
     }
 
     pub async fn start(&self) -> Result<()> {
+        self.start_with_http_port(3000).await
+    }
+
+    pub async fn start_with_http_port(&self, http_port: u16) -> Result<()> {
         info!("🚀 Starting LaneLayer Filler Bot");
         info!("📡 Exit marketplace: 0x{:x}", self.exit_marketplace);
         info!("🤖 Filler address: 0x{:x}", self.filler_address);
@@ -93,10 +102,31 @@ impl FillerBot {
         // Test connections
         self.test_connections().await?;
 
+        // Start HTTP API server in background with signer for auto-collaboration
+        info!("🌐 Starting solver HTTP API on port {}", http_port);
+        let signer = self.signer.clone();
+        let provider_url = self.provider_url.clone();
+        let intent_system = Arc::new(CoreLaneIntentSystem::new(
+            provider_url,
+            self.exit_marketplace,
+            signer,
+        ));
+        let http_handle = tokio::spawn(async move {
+            if let Err(e) = crate::solver_http::serve(http_port, intent_system).await {
+                error!("HTTP server error: {}", e);
+            }
+        });
+
         // Main polling loop
         let mut last_block_number = 0u64;
 
         loop {
+            // Check if HTTP server is still running
+            if http_handle.is_finished() {
+                error!("❌ HTTP server stopped unexpectedly");
+                return Err(anyhow!("HTTP server stopped"));
+            }
+
             match self.poll_cycle(&mut last_block_number).await {
                 Ok(_) => {
                     debug!("Poll cycle completed successfully");
@@ -423,6 +453,89 @@ impl FillerBot {
                         btc_destination,
                         lane_btc_amount: actual_btc_amount, // Store the actual BTC amount to send, not the total locked
                         fee: max_fee,
+                    }));
+                }
+                IntentCall::CreateIntentAndLock {
+                    eip712sig,
+                    lock_data,
+                } => {
+                    debug!(
+                        "🔐 Detected createIntentAndLock call (lock_data_len={}, sig_len={})",
+                        lock_data.len(),
+                        eip712sig.len()
+                    );
+
+                    let lock: LockData = from_reader(Cursor::new(&lock_data))
+                        .map_err(|e| anyhow::anyhow!("Failed to parse lockData CBOR: {}", e))?;
+                    debug!(
+                        "📦 Parsed lock data: nonce={}, value={}, intent_len={}",
+                        lock.nonce,
+                        lock.value,
+                        lock.intent.len()
+                    );
+
+                    let cbor_intent = CborIntentData::from_cbor(&lock.intent)?;
+                    debug!(
+                        "✅ CBOR intent parsed from lock data, type: {:?}",
+                        cbor_intent.intent_type
+                    );
+
+                    let btc_destination = self
+                        .parse_bitcoin_address_from_cbor_intent(&cbor_intent)
+                        .await?;
+                    debug!("✅ Bitcoin destination extracted: {}", btc_destination);
+
+                    let fill_data = cbor_intent.parse_anchor_bitcoin_fill()?;
+                    let amount = fill_data.amount;
+                    let fee = fill_data.max_fee;
+                    debug!(
+                        "💰 Intent amounts from CBOR: amount={}, fee={}, expire_by={}",
+                        amount, fee, fill_data.expire_by
+                    );
+
+                    let provider = self.get_provider();
+                    let chain_id = provider
+                        .get_chain_id()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to fetch chain_id: {}", e))?;
+                    debug!("🌐 Using chain_id {} for EIP-712 domain", chain_id);
+
+                    let domain = Eip712Domain {
+                        name: "CoreLaneIntent".to_string(),
+                        version: "1".to_string(),
+                        chain_id,
+                        verifying_contract: self.exit_marketplace,
+                    };
+
+                    let signer_address = verify_eip712_signature(
+                        &domain,
+                        &lock.intent,
+                        lock.nonce,
+                        lock.value,
+                        &eip712sig,
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to recover signer from EIP-712 signature: {}", e)
+                    })?;
+                    debug!("🧾 Recovered signer address: 0x{:x}", signer_address);
+
+                    let nonce_u64 = lock.nonce.to::<u64>();
+                    let intent_id = crate::intent_contract::calculate_intent_id(
+                        signer_address,
+                        nonce_u64,
+                        Bytes::from(lock.intent.clone()),
+                    );
+                    debug!(
+                        "🆔 Calculated intent ID from createIntentAndLock: 0x{:x}",
+                        intent_id
+                    );
+
+                    return Ok(Some(IntentData {
+                        intent_id: format!("0x{:x}", intent_id),
+                        user_address: signer_address,
+                        btc_destination,
+                        lane_btc_amount: amount,
+                        fee,
                     }));
                 }
                 _ => {
@@ -827,7 +940,9 @@ impl FillerBot {
                     intent.intent_id, intent.lane_btc_amount, DUST_LIMIT
                 );
                 let mut manager = self.intent_manager.lock().await;
-                if let Err(e) = manager.update_intent_status(&intent.intent_id, IntentStatus::Failed) {
+                if let Err(e) =
+                    manager.update_intent_status(&intent.intent_id, IntentStatus::Failed)
+                {
                     error!("Failed to update intent status: {}", e);
                 }
                 manager.remove_intent(&intent.intent_id);
