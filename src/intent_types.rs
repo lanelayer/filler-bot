@@ -1,10 +1,11 @@
 use alloy_primitives::U256;
 use anyhow::Result;
 use ciborium::{from_reader, into_writer};
-use serde::{Deserialize, Serialize};
+use serde_repr::{Deserialize_repr, Serialize_repr};
+use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use std::io::Cursor;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum IntentType {
     AnchorBitcoinFill = 1,
@@ -25,13 +26,13 @@ impl From<IntentType> for u8 {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize_tuple, Deserialize_tuple)]
 pub struct IntentData {
     pub intent_type: IntentType,
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize_tuple, Deserialize_tuple)]
 pub struct AnchorBitcoinFill {
     pub bitcoin_address: Vec<u8>,
     pub amount: U256,
