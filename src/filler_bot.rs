@@ -374,9 +374,9 @@ impl FillerBot {
                     );
                     debug!("Calculated intent_id: {:?}", intent_id);
 
-                    // Convert locked value from wei to sats (1 sat = 1 gwei = 10^9 wei)
+                    // Convert locked value from wei to sats (1 sat = 10^10 wei)
                     let value_wei = crate::intent_contract::get_transaction_value(&tx_envelope);
-                    let gwei = U256::from(1_000_000_000u64);
+                    let gwei = U256::from(10_000_000_000u64);
                     let locked_value_sats = value_wei / gwei;
 
                     debug!(
